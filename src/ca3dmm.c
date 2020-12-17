@@ -1,0 +1,727 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include <math.h>
+#include <mpi.h>
+
+#include "partition.h"
+#include "cannon.h"
+#include "ca3dmm.h"
+#include "mat_redist.h"
+
+static inline void swap_int(int *a, int *b)
+{
+    int tmp = *a;
+    *a = *b;
+    *b = tmp;
+}
+
+static inline void transpose_cm_mat(
+    const int A_nrow, const int A_ncol, const double *A, const int ldA,
+    double *A_trans, const int ldAT
+)
+{
+    // TODO: use multithreading if necessary
+    for (int j = 0; j < A_ncol; j++)
+    {
+        for (int i = 0; i < A_nrow; i++)
+        {
+            int idx0 = i * ldA  + j;
+            int idx1 = j * ldAT + i;
+            A_trans[idx1] = A[idx0];
+        }
+    }
+}
+
+// Initialize a camm3d_engine structure for C := op(A) * op(B)
+void ca3dmm_engine_init(
+    const int m, const int n, const int k, const int trans_A, const int trans_B, 
+    const int src_A_srow, const int src_A_nrow,
+    const int src_A_scol, const int src_A_ncol,
+    const int src_B_srow, const int src_B_nrow,
+    const int src_B_scol, const int src_B_ncol,
+    MPI_Comm comm, ca3dmm_engine_p *engine_
+)
+{
+    *engine_ = NULL;
+    ca3dmm_engine_p engine = (ca3dmm_engine_p) malloc(sizeof(ca3dmm_engine_s));
+    memset(engine, 0, sizeof(ca3dmm_engine_s));
+
+    double start_t = MPI_Wtime();
+
+    // 1. Get the basic process grid
+    engine->m = m;
+    engine->n = n;
+    engine->k = k;
+    MPI_Comm_dup(comm, &engine->comm_glb);
+    MPI_Comm_size(comm, &engine->n_proc);
+    MPI_Comm_rank(comm, &engine->my_rank);
+    int p = engine->n_proc;
+    int mp, np, kp, rp;
+    calc_3d_decomposition(p, m, n, k, &mp, &np, &kp, &rp);
+    if ((mp < 1) || (np < 1) || (kp < 1) || (mp * np * kp > p))
+    {
+        if (engine->my_rank == 0) 
+        {
+            fprintf(stderr, "3D decomposition function error: p = %d, mp, np, kp = %d, %d, %d\n", p, mp, np, kp);
+            fflush(stderr);
+        }
+        ca3dmm_engine_free(&engine);
+        return;
+    }
+    engine->mp = mp;
+    engine->np = np;
+    engine->kp = kp;
+    engine->rp = rp;
+    engine->is_active = (engine->my_rank < mp * np * kp) ? 1 : 0;
+    engine->is_BTB    = 0;
+    engine->redist_ms = 0.0;
+    engine->dupAB_ms  = 0.0;
+    engine->cannon_ms = 0.0;
+    engine->reduce_ms = 0.0;
+    engine->n_exec    = 0;
+
+    // 2. Handle the task groups, note that both mp & np are powers of 2
+    int rank_k  = engine->my_rank / (mp * np);
+    int rank_mn = engine->my_rank % (mp * np);
+    int rank_n  = rank_mn / mp;
+    int rank_m  = rank_mn % mp; 
+    int task_m_num  = 1,  task_m_id = 0;
+    int task_n_num  = 1,  task_n_id = 0;
+    int task_k_num  = kp, task_k_id = rank_k;
+    int task_k_nproc = 1;
+    if (engine->is_active)
+    {
+        task_k_nproc = mp * np;
+        if (mp > np)
+        {
+            task_m_num   = mp / np;
+            task_m_id    = rank_mn / (np * np);
+            task_k_nproc = np * np;
+        }
+        if (np > mp)
+        {
+            task_n_num   = np / mp;
+            task_n_id    = rank_mn / (mp * mp);
+            task_k_nproc = mp * mp;
+        }
+    } else {
+        rank_m = 0; rank_n  = 0;
+        rank_k = 0; rank_mn = 0;
+        task_m_num = 0;  task_m_id = 0;
+        task_n_num = 0;  task_n_id = 0;
+        task_k_num = 0;  task_k_id = 0;
+    }  // End of "if (engine->is_active)"
+    engine->rank_m     = rank_m;
+    engine->rank_n     = rank_n;
+    engine->rank_k     = rank_k;
+    engine->task_m_num = task_m_num;
+    engine->task_m_id  = task_m_id;
+    engine->task_n_num = task_n_num;
+    engine->task_n_id  = task_n_id;
+    engine->task_k_num = task_k_num;
+    engine->task_k_id  = task_k_id;
+
+    // 3. Set up the communicators
+    // In the process grid, each mn-plane has (task_m_num * task_n_num) 2D Cannon tasks.
+    // (1) If n >= 2 * m, A block is a near square block but B block is a short-fat block, A block needs to be
+    // duplicated task_n_num > 1 times, each task_k_nproc == mp * mp processes holds a copy of the A block.
+    // (2) If m >= 2 * n, A block is a tall-skinny block but B block is a near square block, B block needs to be
+    // duplicated task_m_num > 1 times, each task_k_nproc == np * np processes holds a copy of the B block.
+    // All processes in comm_2dmm and comm_mn_bcast are in the same mn-plane.
+    int color_cannon, color_k_reduce, color_mn_bcast;
+    int task_mn_num = task_m_num * task_n_num;
+    int task_mn_id  = task_m_id  + task_n_id;   // task_m_id and task_n_id cannot > 0 at the same time
+    if (engine->is_active == 1)
+    {
+        color_cannon   = rank_k * task_mn_num + task_mn_id;
+        color_k_reduce = rank_mn;
+        color_mn_bcast = rank_k * task_k_nproc + rank_mn % task_k_nproc;
+    } else {
+        // 19241112 should be large enough
+        color_cannon   = 19241112;
+        color_k_reduce = 19241112;
+        color_mn_bcast = 19241112;
+    }
+    MPI_Comm_split(comm, color_cannon,   engine->my_rank, &engine->comm_2dmm);
+    MPI_Comm_split(comm, color_k_reduce, engine->my_rank, &engine->comm_k_reduce);
+    MPI_Comm_split(comm, color_mn_bcast, engine->my_rank, &engine->comm_mn_bcast);
+
+    // 4. Calculate A, B, C block information
+    if (engine->is_active)
+    {
+        int task_m_spos, task_m_size;
+        int task_n_spos, task_n_size;
+        int task_k_spos, task_k_size;
+        calc_block_size_pos(m, task_m_num, task_m_id, &task_m_size, &task_m_spos);
+        calc_block_size_pos(n, task_n_num, task_n_id, &task_n_size, &task_n_spos);
+        calc_block_size_pos(k, task_k_num, task_k_id, &task_k_size, &task_k_spos);
+        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine);
+        cannon_engine_p ce = engine->cannon_engine;
+        if (ce == NULL)
+        {
+            ca3dmm_engine_free(&engine);
+            return;
+        }
+        engine->A_2dmm_srow = task_m_spos + ce->A_srow;
+        engine->A_2dmm_scol = task_k_spos + ce->A_scol;
+        engine->A_2dmm_nrow = ce->A_nrow;
+        engine->A_2dmm_ncol = ce->A_ncol;
+        engine->B_2dmm_srow = task_k_spos + ce->B_srow;
+        engine->B_2dmm_scol = task_n_spos + ce->B_scol;
+        engine->B_2dmm_nrow = ce->B_nrow;
+        engine->B_2dmm_ncol = ce->B_ncol;
+        engine->C_2dmm_srow = task_m_spos + ce->C_srow;
+        engine->C_2dmm_scol = task_n_spos + ce->C_scol;
+        engine->C_2dmm_nrow = ce->C_nrow;
+        engine->C_2dmm_ncol = ce->C_ncol;
+
+        engine->C_out_srow = engine->C_2dmm_srow;
+        engine->C_out_nrow = engine->C_2dmm_nrow;
+        int C_out_scol, C_out_ncol;
+        int *C_out_rs_cnt = (int *) malloc(sizeof(int) * task_k_num);
+        for (int i = 0; i < task_k_num; i++)
+        {
+            calc_block_size_pos(engine->C_2dmm_ncol, task_k_num, i, &C_out_ncol, &C_out_scol);
+            C_out_rs_cnt[i] = C_out_ncol * engine->C_2dmm_nrow;
+            if (i == task_k_id)
+            {
+                engine->C_out_scol = engine->C_2dmm_scol + C_out_scol;
+                engine->C_out_ncol = C_out_ncol;
+            }
+        }
+        engine->C_out_rs_cnt = C_out_rs_cnt;
+    } else {
+        engine->A_2dmm_srow = 0;
+        engine->A_2dmm_scol = 0;
+        engine->A_2dmm_nrow = 0;
+        engine->A_2dmm_ncol = 0;
+        engine->B_2dmm_srow = 0;
+        engine->B_2dmm_scol = 0;
+        engine->B_2dmm_nrow = 0;
+        engine->B_2dmm_ncol = 0;
+        engine->C_2dmm_srow = 0;
+        engine->C_2dmm_scol = 0;
+        engine->C_2dmm_nrow = 0;
+        engine->C_2dmm_ncol = 0;
+
+        engine->C_out_srow = 0;
+        engine->C_out_scol = 0;
+        engine->C_out_nrow = 0;
+        engine->C_out_ncol = 0;
+        engine->C_out_rs_cnt = NULL;
+    }  // End of "if (engine->is_active)"
+
+    // 5. Set up mat_redist_engine
+    // (1) src_{A, B}_{s, n}{row, col} describes the source blocks of A & B, not op(A) & op(B),
+    //     so we do not need to swap them if A and/or B need to be transposed.
+    // (2) engine->{A, B}_{s, n}{row, col} describes the required blocks of op(A) and op(B)
+    //     in op(A) * op(B), so the row & col of the actual required source blocks need to be
+    //     swapped if op == transpose. 
+    // (3) The input A and B matrices are column-major, mat_redist_engine uses row-major, so 
+    //     we need to swap the parameters when calling mat_redist_engine_init().
+    int req_A_srow = engine->A_2dmm_srow;
+    int req_A_scol = engine->A_2dmm_scol;
+    int req_A_nrow = engine->A_2dmm_nrow;
+    int req_A_ncol = engine->A_2dmm_ncol;
+    int req_B_srow = engine->B_2dmm_srow;
+    int req_B_scol = engine->B_2dmm_scol;
+    int req_B_nrow = engine->B_2dmm_nrow;
+    int req_B_ncol = engine->B_2dmm_ncol;
+    if (trans_A)
+    {
+        swap_int(&req_A_srow, &req_A_scol);
+        swap_int(&req_A_nrow, &req_A_ncol);
+    }
+    if (trans_B)
+    {
+        swap_int(&req_B_srow, &req_B_scol);
+        swap_int(&req_B_nrow, &req_B_ncol);
+    }
+    engine->trans_A = trans_A;
+    engine->trans_B = trans_B;
+    if (engine->is_active)
+    {
+        if (task_m_num > 1)
+        {
+            // B needs to be duplicated among processes. Only rank 0 in comm_mn_bcast will get 
+            // the B block using mat_redist, then it will broadcast the B block in comm_mn_bcast.
+            if (task_m_id == 0)
+            {
+                mat_redist_engine_init(
+                    src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
+                    req_B_scol, req_B_srow, req_B_ncol, req_B_nrow, 
+                    comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+                );
+            } else {
+                mat_redist_engine_init(
+                    src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
+                    0,          0,          0,          0, 
+                    comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+                );
+            }
+        } else {
+            // B does not need to be duplicated
+            mat_redist_engine_init(
+                src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
+                req_B_scol, req_B_srow, req_B_ncol, req_B_nrow, 
+                comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+            );
+        }  // End of "if (task_m_num > 0)"
+
+        if (task_n_num > 1)
+        {
+            // A needs to be duplicated among processes. Only rank 0 in comm_mn_bcast will get 
+            // the A block using mat_redist, then it will broadcast the A block in comm_mn_bcast.
+            if (task_n_id == 0)
+            {
+                mat_redist_engine_init(
+                    src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
+                    req_A_scol, req_A_srow, req_A_ncol, req_A_nrow, 
+                    comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
+                );
+            } else {
+                mat_redist_engine_init(
+                    src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
+                    0,          0,          0,          0, 
+                    comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
+                );
+            }
+        } else {
+            // A does not need to be duplicated
+            mat_redist_engine_init(
+                src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
+                req_A_scol, req_A_srow, req_A_ncol, req_A_nrow, 
+                comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
+            );
+        }  // End of "if (task_n_num > 0)"
+    } else {
+        // Non-active processes still need to participate in initial A & B redistribution,
+        // but their {A, B}_{s, n}{row, col} == 0. ALso note that since active processes
+        // initialize redist_B first, non-active processes need to match the order
+        mat_redist_engine_init(
+            src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
+            0,          0,          0,          0, 
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+        );
+        mat_redist_engine_init(
+            src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
+            0,          0,          0,          0, 
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
+        );
+    }
+
+    if ((engine->redist_A == NULL) || (engine->redist_B == NULL))
+    {
+        ca3dmm_engine_free(&engine);
+        return;
+    }
+
+    // 6. Allocate local matrix blocks
+    if (engine->is_active)
+    {
+        void *A_2dmm  = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
+        void *A_trans = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
+        void *B_2dmm  = malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol);
+        void *B_trans = malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol);
+        void *C_2dmm  = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
+        void *C_out   = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
+        if ((A_2dmm  == NULL) || (A_trans == NULL) || (B_2dmm == NULL) || 
+            (B_trans == NULL) || (C_2dmm  == NULL) || (C_out  == NULL))
+        {
+            fprintf(stderr, "[ERROR] Failed to allocate ca3dmm_engine matrix buffers\n");
+            ca3dmm_engine_free(&engine);
+            return;
+        }
+        engine->A_2dmm  = A_2dmm;
+        engine->A_trans = A_trans;
+        engine->B_2dmm  = B_2dmm;
+        engine->B_trans = B_trans;
+        engine->C_2dmm  = C_2dmm;
+        engine->C_out   = C_out;
+    }
+
+    double stop_t = MPI_Wtime();
+    engine->init_ms = 1000.0 * (stop_t - start_t);
+
+    *engine_ = engine;
+}
+
+// Initialize a camm3d_engine structure for C := B^T * B
+void ca3dmm_engine_init_BTB(
+    const int n, const int k, 
+    const int src_B_srow, const int src_B_nrow, 
+    const int src_B_scol, const int src_B_ncol,
+    MPI_Comm comm, ca3dmm_engine_p *engine_
+)
+{
+    *engine_ = NULL;
+    ca3dmm_engine_p engine = (ca3dmm_engine_p) malloc(sizeof(ca3dmm_engine_s));
+    memset(engine, 0, sizeof(ca3dmm_engine_s));
+
+    double start_t = MPI_Wtime();
+
+    // 1. Get the basic process grid
+    int m = n;
+    engine->m = n;
+    engine->n = n;
+    engine->k = k;
+    MPI_Comm_dup(comm, &engine->comm_glb);
+    MPI_Comm_size(comm, &engine->n_proc);
+    MPI_Comm_rank(comm, &engine->my_rank);
+    int p = engine->n_proc;
+    int mp, np, kp, rp;
+    calc_3d_decomposition_nk(p, n, k, &np, &kp, &rp);
+    mp = np;
+    if ((mp < 1) || (np < 1) || (kp < 1) || (mp * np * kp > p))
+    {
+        if (engine->my_rank == 0) 
+        {
+            fprintf(stderr, "3D decomposition function error: p = %d, mp, np, kp = %d, %d, %d\n", p, mp, np, kp);
+            fflush(stderr);
+        }
+        ca3dmm_engine_free(&engine);
+        return;
+    }
+    engine->mp = mp;
+    engine->np = np;
+    engine->kp = kp;
+    engine->rp = rp;
+    engine->is_active = (engine->my_rank < mp * np * kp) ? 1 : 0;
+    engine->is_BTB    = 1;
+    engine->redist_ms = 0.0;
+    engine->dupAB_ms  = 0.0;
+    engine->cannon_ms = 0.0;
+    engine->reduce_ms = 0.0;
+    engine->n_exec    = 0;
+
+    // 2. Handle the task groups
+    // Since np == mp, only task_k_num can > 1
+    int rank_k  = engine->my_rank / (mp * np);
+    int rank_mn = engine->my_rank % (mp * np);
+    int rank_n  = rank_mn / mp;
+    int rank_m  = rank_mn % mp; 
+    int task_m_num  = 1,  task_m_id = 0;
+    int task_n_num  = 1,  task_n_id = 0;
+    int task_k_num  = kp, task_k_id = rank_k;
+    if (engine->is_active == 0)
+    {
+        rank_m = 0; rank_n  = 0;
+        rank_k = 0; rank_mn = 0;
+        task_m_num = 0;  task_m_id = 0;
+        task_n_num = 0;  task_n_id = 0;
+        task_k_num = 0;  task_k_id = 0;
+    }
+    engine->rank_m     = rank_m;
+    engine->rank_n     = rank_n;
+    engine->rank_k     = rank_k;
+    engine->task_m_num = task_m_num;
+    engine->task_m_id  = task_m_id;
+    engine->task_n_num = task_n_num;
+    engine->task_n_id  = task_n_id;
+    engine->task_k_num = task_k_num;
+    engine->task_k_id  = task_k_id;
+
+    // 3. Set up the communicators
+    // Since np == mp, only comm_2dmm and comm_k_reduce is needed.
+    // In the process grid, each mn-plane has exactly one 2D Cannon tasks.
+    int color_cannon, color_k_reduce;
+    if (engine->is_active == 1)
+    {
+        color_cannon   = rank_k;
+        color_k_reduce = rank_mn;
+    } else {
+        // 19241112 should be large enough
+        color_cannon   = 19241112;
+        color_k_reduce = 19241112;
+    }
+    MPI_Comm_split(comm, color_cannon,   engine->my_rank, &engine->comm_2dmm);
+    MPI_Comm_split(comm, color_k_reduce, engine->my_rank, &engine->comm_k_reduce);
+
+    // 4. Calculate A, B, C block information
+    if (engine->is_active)
+    {
+        int task_m_spos, task_m_size;
+        int task_n_spos, task_n_size;
+        int task_k_spos, task_k_size;
+        calc_block_size_pos(m, task_m_num, task_m_id, &task_m_size, &task_m_spos);
+        calc_block_size_pos(n, task_n_num, task_n_id, &task_n_size, &task_n_spos);
+        calc_block_size_pos(k, task_k_num, task_k_id, &task_k_size, &task_k_spos);
+        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine);
+        cannon_engine_p ce = engine->cannon_engine;
+        if (ce == NULL)
+        {
+            ca3dmm_engine_free(&engine);
+            return;
+        }
+        engine->A_2dmm_srow = task_m_spos + ce->A_srow;
+        engine->A_2dmm_scol = task_k_spos + ce->A_scol;
+        engine->A_2dmm_nrow = ce->A_nrow;
+        engine->A_2dmm_ncol = ce->A_ncol;
+        engine->B_2dmm_srow = task_k_spos + ce->B_srow;
+        engine->B_2dmm_scol = task_n_spos + ce->B_scol;
+        engine->B_2dmm_nrow = ce->B_nrow;
+        engine->B_2dmm_ncol = ce->B_ncol;
+        engine->C_2dmm_srow = task_m_spos + ce->C_srow;
+        engine->C_2dmm_scol = task_n_spos + ce->C_scol;
+        engine->C_2dmm_nrow = ce->C_nrow;
+        engine->C_2dmm_ncol = ce->C_ncol;
+
+        engine->C_out_srow = engine->C_2dmm_srow;
+        engine->C_out_nrow = engine->C_2dmm_nrow;
+        int C_out_scol, C_out_ncol;
+        int *C_out_rs_cnt = (int *) malloc(sizeof(int) * task_k_num);
+        for (int i = 0; i < task_k_num; i++)
+        {
+            calc_block_size_pos(engine->C_2dmm_ncol, task_k_num, i, &C_out_ncol, &C_out_scol);
+            C_out_rs_cnt[i] = C_out_ncol * engine->C_2dmm_nrow;
+            if (i == task_k_id)
+            {
+                engine->C_out_scol = engine->C_2dmm_scol + C_out_scol;
+                engine->C_out_ncol = C_out_ncol;
+            }
+        }
+        engine->C_out_rs_cnt = C_out_rs_cnt;
+    } else {
+        engine->A_2dmm_srow = 0;
+        engine->A_2dmm_scol = 0;
+        engine->A_2dmm_nrow = 0;
+        engine->A_2dmm_ncol = 0;
+        engine->B_2dmm_srow = 0;
+        engine->B_2dmm_scol = 0;
+        engine->B_2dmm_nrow = 0;
+        engine->B_2dmm_ncol = 0;
+        engine->C_2dmm_srow = 0;
+        engine->C_2dmm_scol = 0;
+        engine->C_2dmm_nrow = 0;
+        engine->C_2dmm_ncol = 0;
+
+        engine->C_out_srow = 0;
+        engine->C_out_scol = 0;
+        engine->C_out_nrow = 0;
+        engine->C_out_ncol = 0;
+        engine->C_out_rs_cnt = NULL;
+    }  // End of "if (engine->is_active)"
+
+    // 5. Set up mat_redist_engine
+    // (1) We only need to redistribute B globally, A (== B^T) block can be obtained
+    //     using P2P communication efficiently. 
+    // (2) Non-active processes still need to participate in global B redistribution, 
+    //     but their B_{s, n}{row, col} == 0.
+    // (3) The input A and B matrices are column-major, mat_redist_engine uses row-major, so 
+    //     we need to swap the parameters when calling mat_redist_engine_init().
+    mat_redist_engine_init(
+        src_B_scol,     src_B_srow,     src_B_ncol,     src_B_nrow, 
+        engine->B_2dmm_scol, engine->B_2dmm_srow, engine->B_2dmm_ncol, engine->B_2dmm_nrow, 
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+    );
+    if (engine->redist_B == NULL)
+    {
+        ca3dmm_engine_free(&engine);
+        return;
+    }
+
+    // 6. Allocate local matrix blocks
+    if (engine->is_active)
+    {
+        void *A_2dmm  = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
+        void *A_trans = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
+        void *B_2dmm  = malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol);
+        void *C_2dmm  = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
+        void *C_out   = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
+        if ((A_2dmm == NULL) || (A_trans == NULL) || (B_2dmm == NULL) || 
+            (C_2dmm == NULL) || (C_out == NULL))
+        {
+            fprintf(stderr, "[ERROR] Failed to allocate ca3dmm_engine matrix buffers\n");
+            ca3dmm_engine_free(&engine);
+            return;
+        }
+        engine->A_2dmm  = A_2dmm;
+        engine->A_trans = A_trans;
+        engine->B_2dmm  = B_2dmm;
+        engine->C_2dmm  = C_2dmm;
+        engine->C_out   = C_out;
+    }
+    engine->B_trans = NULL;
+
+    double stop_t = MPI_Wtime();
+    engine->init_ms = 1000.0 * (stop_t - start_t);
+
+    *engine_ = engine;
+}
+
+// Free a camm3d_engine structure
+void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
+{
+    ca3dmm_engine_p engine = *engine_;
+    if (engine == NULL) return;
+    free(engine->A_2dmm);
+    free(engine->A_trans);
+    free(engine->B_2dmm);
+    free(engine->B_trans);
+    free(engine->C_2dmm);
+    free(engine->C_out);
+    MPI_Comm_free(&engine->comm_glb);
+    if (engine->is_BTB == 0) MPI_Comm_free(&engine->comm_mn_bcast);
+    MPI_Comm_free(&engine->comm_k_reduce);
+    MPI_Comm_free(&engine->comm_2dmm);
+    mat_redist_engine_free(&engine->redist_A);
+    mat_redist_engine_free(&engine->redist_B);
+    cannon_engine_free(&engine->cannon_engine);
+    free(engine);
+    *engine_ = NULL;
+}
+
+// Perform Communication-Avoiding 3D Matrix Multiplication (CA3DMM)
+void ca3dmm_engine_exec(
+    const void *src_A, const int ldA, 
+    const void *src_B, const int ldB, 
+    ca3dmm_engine_p engine
+)
+{
+    if (engine == NULL)
+    {
+        fprintf(stderr, "[ERROR] ca3dmm_engine not initialized\n");
+        return;
+    }
+
+    int A_2dmm_nrow = engine->A_2dmm_nrow;
+    int A_2dmm_ncol = engine->A_2dmm_ncol;
+    int B_2dmm_nrow = engine->B_2dmm_nrow;
+    int B_2dmm_ncol = engine->B_2dmm_ncol;
+    int C_2dmm_nrow = engine->C_2dmm_nrow;
+    int C_2dmm_ncol = engine->C_2dmm_ncol;
+    double *A_2dmm  = (double *) engine->A_2dmm;
+    double *A_trans = (double *) engine->A_trans;
+    double *B_2dmm  = (double *) engine->B_2dmm;
+    double *B_trans = (double *) engine->B_trans;
+    double *C_2dmm  = (double *) engine->C_2dmm;
+    double *C_out   = (double *) engine->C_out;
+
+    double start_t, stop_t, exec_start_t, exec_stop_t;
+    
+    exec_start_t = MPI_Wtime();
+
+    // Notice again: 
+    // (1) mat_redist_engine uses row-major but ca3dmm_engine uses col-major
+    // (2) task_m_num and task_n_num cannot both > 1
+    if (engine->is_BTB == 0)
+    {
+        int trans_A = engine->trans_A;
+        int trans_B = engine->trans_B;
+
+        // If A/B needs to be transposed, the req_{A/B}_nrow is swapped with req_{A/B}_ncol
+        // in ca3dmm_engine_init(), recv_ld{A/B} should == req_{A/B}_nrow.
+        start_t = MPI_Wtime();
+        int    recv_ldA = (trans_A) ? A_2dmm_ncol : A_2dmm_nrow;
+        int    recv_ldB = (trans_B) ? B_2dmm_ncol : B_2dmm_nrow;
+        double *A_recv  = (trans_A) ? A_trans : A_2dmm;
+        double *B_recv  = (trans_B) ? B_trans : B_2dmm;
+        mat_redist_engine_exec(engine->redist_A, src_A, ldA, A_recv, recv_ldA);
+        mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_recv, recv_ldB);
+        if (trans_A) transpose_cm_mat(A_2dmm_nrow, A_2dmm_ncol, A_trans, A_2dmm_ncol, A_2dmm, A_2dmm_nrow);
+        if (trans_B) transpose_cm_mat(B_2dmm_nrow, B_2dmm_ncol, B_trans, B_2dmm_ncol, B_2dmm, B_2dmm_nrow);
+        stop_t = MPI_Wtime();
+        engine->redist_ms += 1000.0 * (stop_t - start_t);
+
+        // The A_2dmm and B_2dmm is now op(A)_local and op(B)_local, broadcast it if needed
+        start_t = MPI_Wtime();
+        if (engine->task_m_num > 1)
+            MPI_Bcast(B_2dmm, B_2dmm_nrow * B_2dmm_ncol, MPI_DOUBLE, 0, engine->comm_mn_bcast);
+        if (engine->task_n_num > 1)
+            MPI_Bcast(A_2dmm, A_2dmm_nrow * A_2dmm_ncol, MPI_DOUBLE, 0, engine->comm_mn_bcast);
+        stop_t = MPI_Wtime();
+        engine->dupAB_ms += 1000.0 * (stop_t - start_t);
+    } else {
+        start_t = MPI_Wtime();
+        mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_2dmm, B_2dmm_nrow);
+        stop_t = MPI_Wtime();
+        engine->redist_ms += 1000.0 * (stop_t - start_t);
+
+        // In each Cannon task group, block Bij hold by process Pij == the transpose of 
+        // block Aji required by process Pji. Since Cannon 2D calls DGEMM with the 
+        // parameters of no-transpose for both A & B block, we need to  manually 
+        // transpose the received Aji^T before calling Cannon.
+        start_t = MPI_Wtime();
+        if (engine->is_active == 1)
+        {
+            cannon_engine_p ce = engine->cannon_engine;
+            int ce_rank_row = ce->rank_row;
+            int ce_rank_col = ce->rank_col;
+            if (ce_rank_row == ce_rank_col)
+            {
+                assert(B_2dmm_nrow * B_2dmm_ncol == A_2dmm_nrow * A_2dmm_ncol);
+                memcpy(A_trans, B_2dmm, sizeof(double) * B_2dmm_nrow * B_2dmm_ncol);
+            } else {
+                int ce_pair_rank = ce_rank_col * ce->np_dim + ce_rank_row;
+                MPI_Request send_req;
+                MPI_Isend(B_2dmm,  B_2dmm_nrow * B_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0, ce->comm, &send_req);
+                MPI_Recv (A_trans, A_2dmm_nrow * A_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0, ce->comm, MPI_STATUS_IGNORE);
+                MPI_Wait(&send_req, MPI_STATUS_IGNORE);
+            }
+            transpose_cm_mat(A_2dmm_nrow, A_2dmm_ncol, A_trans, A_2dmm_ncol, A_2dmm, A_2dmm_nrow);
+        }  // End of "if (engine->is_active == 1)"
+        stop_t = MPI_Wtime();
+        engine->dupAB_ms += 1000.0 * (stop_t - start_t);
+    }  // End of "if (engine->is_BTB == 0)"
+
+    if (engine->is_active == 1)
+    {
+        start_t = MPI_Wtime();
+        if (engine->task_k_num == 1) C_2dmm = C_out;
+        cannon_engine_exec(1.0, A_2dmm, B_2dmm, 0.0, C_2dmm, engine->cannon_engine);
+        stop_t = MPI_Wtime();
+        engine->cannon_ms += 1000.0 * (stop_t - start_t);
+
+        start_t = MPI_Wtime();
+        if (engine->task_k_num > 1)
+        {
+            MPI_Reduce_scatter(
+                C_2dmm, C_out, engine->C_out_rs_cnt, MPI_DOUBLE, 
+                MPI_SUM, engine->comm_k_reduce
+            );
+        }
+        stop_t = MPI_Wtime();
+        engine->reduce_ms += 1000.0 * (stop_t - start_t);
+    }
+
+    exec_stop_t = MPI_Wtime();
+    engine->exec_ms += 1000.0 * (exec_stop_t - exec_start_t);
+    engine->n_exec++;
+}
+
+
+// Reset the statistic data of a ca3dmm_engine (not a collective call)
+void ca3dmm_engine_reset_stat(ca3dmm_engine_p engine)
+{
+    if (engine == NULL) return;
+    cannon_engine_reset_stat(engine->cannon_engine);
+    engine->redist_ms = 0.0;
+    engine->dupAB_ms  = 0.0;
+    engine->cannon_ms = 0.0;
+    engine->reduce_ms = 0.0;
+    engine->exec_ms   = 0.0;
+    engine->n_exec    = 0;
+}
+
+// Print the statistic data of a ca3dmm_engine (not a collective call)
+void ca3dmm_engine_print_stat(ca3dmm_engine_p engine)
+{
+    if (engine == NULL) return;
+    if (engine->n_exec == 0)
+    {
+        printf("No ca3dmm_engine statistic data to print\n");
+        return;
+    }
+    printf("================== CA3DMM algorithm engine =================\n");
+    printf("* Initialization         : %.2f ms\n", engine->init_ms);
+    printf("* Number of executions   : %d\n", engine->n_exec);
+    printf("* Execution time (avg)   : %.2f ms\n", engine->exec_ms   / engine->n_exec);
+    printf("  * Redist. A & B        : %.2f ms\n", engine->redist_ms / engine->n_exec);
+    printf("  * Duplicate A or B     : %.2f ms\n", engine->dupAB_ms  / engine->n_exec);
+    printf("  * 2D matmul            : %.2f ms\n", engine->cannon_ms / engine->n_exec);
+    printf("  * K-dim reduce-scatter : %.2f ms\n", engine->reduce_ms / engine->n_exec);
+    cannon_engine_print_stat(engine->cannon_engine);
+    printf("============================================================\n");
+}
