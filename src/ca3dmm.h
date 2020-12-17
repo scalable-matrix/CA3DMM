@@ -25,7 +25,7 @@ struct ca3dmm_engine
     int  A_2dmm_srow, A_2dmm_scol;  // 1st row & col of op(A) matrix block needed by this MPI process in 2D matmul
     int  B_2dmm_srow, B_2dmm_scol;  // 1st row & col of op(B) matrix block needed by this MPI process in 2D matmul
     int  C_2dmm_srow, C_2dmm_scol;  // 1st row & col of C matrix block calculated by this MPI process in 2D matmul
-    int  C_out_srow,  C_out_scol;   // 1st row & col of the output C matrix block stored on this MPI process
+    int  C_out_srow,  C_out_scol;   // 1st row & col of output C matrix block stored on this MPI process
     int  A_rd_nrow,   A_rd_ncol;    // Number of rows & cols of op(A) matrix block needed by this MPI process in redistribution 
     int  B_rd_nrow,   B_rd_ncol;    // Number of rows & cols of op(B) matrix block needed by this MPI process in redistribution
     int  A_2dmm_nrow, A_2dmm_ncol;  // Number of rows & cols of op(A) matrix block needed by this MPI process in 2D matmul
@@ -35,19 +35,20 @@ struct ca3dmm_engine
     int  *AB_agv_recvcnts;          // Size unknown, recvcounts array used in MPI_Allgatherv after redistribution for A or B matrix
     int  *AB_agv_displs;            // Size unknown, displs array used in MPI_Allgatherv after redistribution for A or B matrix
     int  *C_rs_recvcnts;            // Size task_k_num, output C matrix block reduce-scatter receive count array
-    void *A_rd_recv;                // Size unknown, op(A) matrix block received in redistribution
+    void *A_rd_recv;                // Size A_rd_nrow   * A_rd_ncol,   op(A) matrix block received in redistribution
     void *A_trans;                  // Size A_2dmm_nrow * A_2dmm_ncol, A_2dmm transpose buffer
     void *A_2dmm;                   // Size A_2dmm_nrow * A_2dmm_ncol, initial op(A) matrix block required in 2D matmul
-    void *B_rd_recv;                // Size unknown, op(A) matrix block received in redistribution
+    void *B_rd_recv;                // Size B_rd_nrow   * B_rd_ncol,   op(A) matrix block received in redistribution
     void *B_trans;                  // Size B_2dmm_nrow * B_2dmm_ncol, B_2dmm transpose buffer
     void *B_2dmm;                   // Size B_2dmm_nrow * B_2dmm_ncol, initial op(B) matrix block required in 2D matmul
     void *C_2dmm;                   // Size C_2dmm_nrow * C_2dmm_ncol, 2D matmul result C matrix block
-    void *C_out;                    // Size unknown, output C matrix block
+    void *C_out;                    // Size C_out_nrow  * C_out_ncol,  output C matrix block
     MPI_Comm comm_AB_agv;           // Communicator for m or n dimension broadcast
     MPI_Comm comm_C_rs;             // Communicator for k dimension reduction
     MPI_Comm comm_2dmm;             // Communicator for 2D matmul in each k_task
     mat_redist_engine_p redist_A;   // Redistribution of A matrix from its initial layout to CA3DMM required layout
     mat_redist_engine_p redist_B;   // Redistribution of B matrix from its initial layout to CA3DMM required layout
+    mat_redist_engine_p redist_C;   // Redistribution of C matrix from CA3DMM output layout to required layout
     cannon_engine_p cannon_engine;  // cannon_engine for 2D matmul
 
     // Statistic data
@@ -70,37 +71,59 @@ extern "C" {
 // Input parameters:
 //   m, n, k         : Size of matrix op(A) (m * k), op(B) (k * n), and C (m * n)
 //   trans_{A, B}    : If A / B matrix need to be transposed
-//   src_{A, B}_srow : First row        of the input A/B matrix on this MPI process
-//   src_{A, B}_nrow : Number of rows   of the input A/B matrix on this MPI process
-//   src_{A, B}_scol : First column     of the input A/B matrix on this MPI process
-//   src_{A, B}_ncol : Number of column of the input A/B matrix on this MPI process
+//   src_{A, B}_srow : First row         of input A/B matrix on this MPI process
+//   src_{A, B}_nrow : Number of rows    of input A/B matrix on this MPI process
+//   src_{A, B}_scol : First column      of input A/B matrix on this MPI process
+//   src_{A, B}_ncol : Number of columns of input A/B matrix on this MPI process
+//   dst_C_srow      : First row         of output C  matrix on this MPI process
+//   dst_C_nrow      : Number of rows    of output C  matrix on this MPI process
+//   dst_C_scol      : First column      of output C  matrix on this MPI process
+//   dst_C_ncol      : Number of columns of output C  matrix on this MPI process
+//   proc_grid       : MPI process grid [mp, np, kp], max(mp, np) must be a multiplier of min(np, mp).
+//                     If proc_grid == NULL, CA3DMM will find a process grid solution.
 //   comm            : MPI communicator of all MPI processes participating CA3DMM
 // Output parameter:
 //   *engine_ : Pointer to an initialized camm3d_engine structure
+// Note: 
+//   (1) CA3DMM does not check the correctness of src_{A, B}_{s, n}{row, col} and dst_C_{s, n}{row, col}
+//   (2) If dst_C_{s, n}{row, col} are all -1, CA3DMM will not redistribute output C matrix
 void ca3dmm_engine_init(
     const int m, const int n, const int k, const int trans_A, const int trans_B, 
     const int src_A_srow, const int src_A_nrow, 
     const int src_A_scol, const int src_A_ncol,
-    const int src_B_srow, const int src_B_nrow, 
+    const int src_B_srow, const int src_B_nrow,
     const int src_B_scol, const int src_B_ncol,
-    MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int dst_C_srow, const int dst_C_nrow,
+    const int dst_C_scol, const int dst_C_ncol,
+    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
 );
 
 // Initialize a camm3d_engine structure for C := B^T * B
 // Input parameters:
 //   n, k       : Size of matrix B (k * n) and C (n * n)
-//   src_B_srow : First row        of the input B matrix on this MPI process
-//   src_B_nrow : Number of rows   of the input B matrix on this MPI process
-//   src_B_scol : First column     of the input B matrix on this MPI process
-//   src_B_ncol : Number of column of the input B matrix on this MPI process
+//   src_B_srow : First row         of input  B matrix on this MPI process
+//   src_B_nrow : Number of rows    of input  B matrix on this MPI process
+//   src_B_scol : First column      of input  B matrix on this MPI process
+//   src_B_ncol : Number of columns of input  B matrix on this MPI process
+//   dst_C_srow : First row         of output C matrix on this MPI process
+//   dst_C_nrow : Number of rows    of output C matrix on this MPI process
+//   dst_C_scol : First column      of output C matrix on this MPI process
+//   dst_C_ncol : Number of columns of output C matrix on this MPI process
+//   proc_grid  : MPI process grid [mp, np, kp], mp must == np.
+//                If proc_grid == NULL, CA3DMM will find a process grid solution.
 //   comm       : MPI communicator of all MPI processes participating CA3DMM
 // Output parameter:
 //   *engine_ : Pointer to an initialized camm3d_engine structure
+// Note: 
+//   (1) CA3DMM does not check the correctness of src_B_{s, n}{row, col} and dst_C_{s, n}{row, col}
+//   (2) If dst_C_{s, n}{row, col} are all -1, CA3DMM will not redistribute output C matrix
 void ca3dmm_engine_init_BTB(
     const int n, const int k, 
-    const int src_B_srow, const int src_B_nrow, 
+    const int src_B_srow, const int src_B_nrow,
     const int src_B_scol, const int src_B_ncol,
-    MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int dst_C_srow, const int dst_C_nrow,
+    const int dst_C_scol, const int dst_C_ncol,
+    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
 );
 
 // Free a camm3d_engine structure
@@ -108,25 +131,34 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_);
 
 // Perform Communication-Avoiding 3D Matrix Multiplication (CA3DMM)
 // Input parameters:
-//   src_{A, B} : Size unknown, input A/B matrix block (col-major) on this MPI process
-//   ld{A, B}   : Leading dimension of src_{A, B}.
-//                If A/B is not transposed, the requirements are ldA >= m and ldB >= k. 
-//                If A/B is     transposed, the requirements are ldA >= k and ldB >= n.
-//   engine     : An initialize camm3d_engine structure
-// Output parameters (engine->):
-//   C_final       : Size C_2dmm_nrow-by-C_2dmm_ncol, final C matrix block on this MPI process, 
-//                   valid if task_k_id = 0
-//   C_s{row, col} : First row/column of C_final in the global C matrix
+//   src_{A, B}  : Size unknown, input A/B matrix block (col-major) on this MPI process
+//   ld{A, B, C} : Leading dimension of src_{A, B} and dst_C
+//                 If A/B is not transposed, ldA >= m and ldB >= k. 
+//                 If A/B is     transposed, ldA >= k and ldB >= n.
+//                 If C block is specified in ca3dmm_engine_{init, init_BTB}(), ldC >= dst_C_nrow.
+//                 If C block is not specified in ca3dmm_engine_{init, init_BTB}(), ldC will be ignored.
+//   engine      : An initialize camm3d_engine structure
+// Output parameters:
+//   dst_C       : If C block is specified in ca3dmm_engine_{init, init_BTB}(), dst_C is a 
+//                 pointer to a buffer of size >= ldC * dst_C_ncol for storing the required C block.
+//                 If C block is not specified in ca3dmm_engine_{init, init_BTB}(), dst_C will be ignored.
+// In engine->:
+//   C_out       : Size C_out_nrow-by-C_out_ncol, output C matrix block on this MPI process
+//   C_out_srow  : First row         of output C matrix on this MPI process
+//   C_out_nrow  : Number of rows    of output C matrix on this MPI process
+//   C_out_scol  : First column      of output C matrix on this MPI process
+//   C_out_ncol  : Number of columns of output C matrix on this MPI process
 void ca3dmm_engine_exec(
-    const void *src_A, const int ldA, 
-    const void *src_B, const int ldB, 
+    const void *src_A, const int ldA,
+    const void *src_B, const int ldB,
+    void *dst_C, const int ldC, 
     ca3dmm_engine_p engine
 );
 
-// Reset the statistic data of a ca3dmm_engine (not a collective call)
+// Reset statistic data of a ca3dmm_engine (not a collective call)
 void ca3dmm_engine_reset_stat(ca3dmm_engine_p engine);
 
-// Print the statistic data of a ca3dmm_engine (not a collective call)
+// Print statistic data of a ca3dmm_engine (not a collective call)
 void ca3dmm_engine_print_stat(ca3dmm_engine_p engine);
 
 #ifdef __cplusplus

@@ -64,18 +64,25 @@ int main(int argc, char **argv)
     C_ncol = n;
 
     // Initial distribution: 1D column partition of A and B
-    int A_in_srow, A_in_nrow, B_in_srow, B_in_nrow;
-    int A_in_scol, A_in_ncol, B_in_scol, B_in_ncol;
-    A_in_srow = 0;
-    A_in_nrow = A_nrow;
-    B_in_srow = 0;
-    B_in_nrow = B_nrow;
-    calc_block_size_pos(A_ncol, n_proc, my_rank, &A_in_ncol, &A_in_scol);
-    calc_block_size_pos(B_ncol, n_proc, my_rank, &B_in_ncol, &B_in_scol);
-    size_t A_in_msize = sizeof(double) * (size_t) A_in_nrow * (size_t) A_in_ncol;
-    size_t B_in_msize = sizeof(double) * (size_t) B_in_nrow * (size_t) B_in_ncol;
-    double *A_in = (double *) malloc(A_in_msize);
-    double *B_in = (double *) malloc(B_in_msize);
+    // Output distribution: 1D column partition of C
+    int A_in_srow, A_in_nrow, A_in_scol, A_in_ncol;
+    int B_in_srow, B_in_nrow, B_in_scol, B_in_ncol;
+    int C_out_srow, C_out_nrow, C_out_scol, C_out_ncol;
+    A_in_srow  = 0;
+    A_in_nrow  = A_nrow;
+    B_in_srow  = 0;
+    B_in_nrow  = B_nrow;
+    C_out_srow = 0;
+    C_out_nrow = C_nrow;
+    calc_block_size_pos(A_ncol, n_proc, my_rank, &A_in_ncol,  &A_in_scol);
+    calc_block_size_pos(B_ncol, n_proc, my_rank, &B_in_ncol,  &B_in_scol);
+    calc_block_size_pos(C_ncol, n_proc, my_rank, &C_out_ncol, &C_out_scol);
+    size_t A_in_msize  = sizeof(double) * (size_t) A_in_nrow  * (size_t) A_in_ncol;
+    size_t B_in_msize  = sizeof(double) * (size_t) B_in_nrow  * (size_t) B_in_ncol;
+    size_t C_out_msize = sizeof(double) * (size_t) C_out_nrow * (size_t) C_out_ncol;
+    double *A_in  = (double *) malloc(A_in_msize);
+    double *B_in  = (double *) malloc(B_in_msize);
+    double *C_out = (double *) malloc(C_out_msize);
     for (int j = 0; j < A_in_ncol; j++)
     {
         int global_j = j + A_in_scol;
@@ -103,9 +110,10 @@ int main(int argc, char **argv)
     ca3dmm_engine_p ce;
     ca3dmm_engine_init(
         m, n, k, trans_A, trans_B, 
-        A_in_srow, A_in_nrow, A_in_scol, A_in_ncol,
-        B_in_srow, B_in_nrow, B_in_scol, B_in_ncol,
-        MPI_COMM_WORLD, &ce
+        A_in_srow,  A_in_nrow,  A_in_scol,  A_in_ncol,
+        B_in_srow,  B_in_nrow,  B_in_scol,  B_in_ncol,
+        C_out_srow, C_out_nrow, C_out_scol, C_out_ncol,
+        NULL, MPI_COMM_WORLD, &ce
     );
     if (ce->my_rank == 0)
     {
@@ -126,21 +134,21 @@ int main(int argc, char **argv)
     }
 
     // Warm up running
-    ca3dmm_engine_exec(A_in, A_in_nrow, B_in, B_in_nrow, ce);
+    ca3dmm_engine_exec(A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow, ce);
     ca3dmm_engine_reset_stat(ce);
 
     // Timing running
     for (int itest = 0; itest < n_test; itest++)
-        ca3dmm_engine_exec(A_in, A_in_nrow, B_in, B_in_nrow, ce);
+        ca3dmm_engine_exec(A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow, ce);
     if (my_rank == 0) ca3dmm_engine_print_stat(ce);
 
     // Check the correctness of the result
     if (chk_res)
     {
-        int C_chk_srow = ce->C_out_srow;
-        int C_chk_nrow = ce->C_out_nrow;
-        int C_chk_scol = ce->C_out_scol;
-        int C_chk_ncol = ce->C_out_ncol;
+        int C_chk_srow = C_out_srow;
+        int C_chk_nrow = C_out_nrow;
+        int C_chk_scol = C_out_scol;
+        int C_chk_ncol = C_out_ncol;
         int A_chk_srow, A_chk_scol, A_chk_nrow, A_chk_ncol;
         int B_chk_srow, B_chk_scol, B_chk_nrow, B_chk_ncol;
         if (trans_A == 0)
@@ -207,16 +215,16 @@ int main(int argc, char **argv)
         int local_error = 0, total_error = 0;
         if (ce->is_active)
         {
-            double *C = ce->C_out;
             for (int j = 0; j < C_chk_ncol; j++)
             {
-                size_t offset = (size_t) j * (size_t) C_chk_nrow;
-                double *C_jcol = C + offset;
-                double *C_chk_jcol = C_chk + offset;
+                size_t out_offset = (size_t) j * (size_t) C_out_nrow;
+                size_t chk_offset = (size_t) j * (size_t) C_chk_nrow;
+                double *C_out_jcol = C_out + out_offset;
+                double *C_chk_jcol = C_chk + chk_offset;
                 for (int i = 0; i < C_chk_nrow; i++)
                 {
-                    double diff = C_jcol[i] - C_chk_jcol[i];
-                    double relerr = fabs(diff / C_chk[i]);
+                    double diff = C_out_jcol[i] - C_chk_jcol[i];
+                    double relerr = fabs(diff / C_chk_jcol[i]);
                     if (relerr > 1e-12) local_error++;
                 }
             }
@@ -230,6 +238,7 @@ int main(int argc, char **argv)
 
     free(A_in);
     free(B_in);
+    free(C_out);
     ca3dmm_engine_free(&ce);
     MPI_Finalize();
     return 0;

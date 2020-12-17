@@ -41,7 +41,9 @@ void ca3dmm_engine_init(
     const int src_A_scol, const int src_A_ncol,
     const int src_B_srow, const int src_B_nrow,
     const int src_B_scol, const int src_B_ncol,
-    MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int dst_C_srow, const int dst_C_nrow,
+    const int dst_C_scol, const int dst_C_ncol,
+    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
 )
 {
     *engine_ = NULL;
@@ -57,13 +59,28 @@ void ca3dmm_engine_init(
     MPI_Comm_size(comm, &engine->n_proc);
     MPI_Comm_rank(comm, &engine->my_rank);
     int p = engine->n_proc;
-    int mp, np, kp, rp;
-    calc_3d_decomposition(p, m, n, k, &mp, &np, &kp, &rp);
+    int mp, np, kp, rp, gen_proc_grid = 1;
+    if (proc_grid != NULL)
+    {
+        mp = proc_grid[0];
+        np = proc_grid[1];
+        kp = proc_grid[2];
+        rp = engine->n_proc - mp * np * kp;
+        int max_mp_np = (mp > np) ? mp : np;
+        int min_mp_np = (mp < np) ? mp : np;
+        if ((max_mp_np % min_mp_np) || (rp < 0))
+        {
+            if (engine->my_rank == 0) printf("[WARNING] Invalid process grid specified: mp, np, kp = %d, %d, %d\n", mp, np, kp);
+        } else {
+            gen_proc_grid = 0;
+        }
+    }
+    if (gen_proc_grid) calc_3d_decomposition(p, m, n, k, &mp, &np, &kp, &rp);
     if ((mp < 1) || (np < 1) || (kp < 1) || (mp * np * kp > p))
     {
         if (engine->my_rank == 0) 
         {
-            fprintf(stderr, "3D decomposition function error: p = %d, mp, np, kp = %d, %d, %d\n", p, mp, np, kp);
+            fprintf(stderr, "[ERROR] Invalid process grid generated: p = %d, mp, np, kp = %d, %d, %d\n", p, mp, np, kp);
             fflush(stderr);
         }
         ca3dmm_engine_free(&engine);
@@ -175,9 +192,8 @@ void ca3dmm_engine_init(
         engine->C_2dmm_scol = task_n_spos + ce->C_scol;
         engine->C_2dmm_nrow = ce->C_nrow;
         engine->C_2dmm_ncol = ce->C_ncol;
-
-        engine->C_out_srow = engine->C_2dmm_srow;
-        engine->C_out_nrow = engine->C_2dmm_nrow;
+        engine->C_out_srow  = engine->C_2dmm_srow;
+        engine->C_out_nrow  = engine->C_2dmm_nrow;
         int C_out_scol, C_out_ncol;
         int *C_rs_recvcnts = (int *) malloc(sizeof(int) * task_k_num);
         for (int i = 0; i < task_k_num; i++)
@@ -204,11 +220,10 @@ void ca3dmm_engine_init(
         engine->C_2dmm_scol = 0;
         engine->C_2dmm_nrow = 0;
         engine->C_2dmm_ncol = 0;
-
-        engine->C_out_srow = 0;
-        engine->C_out_scol = 0;
-        engine->C_out_nrow = 0;
-        engine->C_out_ncol = 0;
+        engine->C_out_srow  = 0;
+        engine->C_out_scol  = 0;
+        engine->C_out_nrow  = 0;
+        engine->C_out_ncol  = 0;
         engine->C_rs_recvcnts = NULL;
     }  // End of "if (engine->is_active)"
 
@@ -300,6 +315,19 @@ void ca3dmm_engine_init(
     }
     engine->AB_agv_recvcnts = AB_agv_recvcnts;
     engine->AB_agv_displs   = AB_agv_displs;
+    if (!((dst_C_srow == -1) || (dst_C_nrow == -1) || (dst_C_scol == -1) || (dst_C_ncol == -1)))
+    {
+        mat_redist_engine_init(
+            engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
+            dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C
+        );
+        if (engine->redist_C == NULL)
+        {
+            ca3dmm_engine_free(&engine);
+            return;
+        }
+    }
 
     // 6. Allocate local matrix blocks
     void *A_rd_recv = NULL, *A_2dmm = NULL, *A_trans = NULL;
@@ -308,17 +336,13 @@ void ca3dmm_engine_init(
     if (engine->is_active)
     {
         A_rd_recv = malloc(sizeof(double) * engine->A_rd_nrow   * engine->A_rd_ncol);
-        if (trans_A) A_trans = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
-        else A_trans = A_rd_recv;
-        if (task_n_num > 1) A_2dmm = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
-        else A_2dmm = A_trans;
         B_rd_recv = malloc(sizeof(double) * engine->B_rd_nrow   * engine->B_rd_ncol);
-        if (trans_B) B_trans = malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol);
-        else B_trans = B_rd_recv;
-        if (task_m_num > 1) B_2dmm = malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol);
-        else B_2dmm = B_trans;
-        C_2dmm = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
-        C_out  = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
+        A_trans   = (trans_A == 1)   ? malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol) : A_rd_recv;
+        B_trans   = (trans_B == 1)   ? malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol) : B_rd_recv;
+        A_2dmm    = (task_n_num > 1) ? malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol) : A_trans;
+        B_2dmm    = (task_m_num > 1) ? malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol) : B_trans;
+        C_2dmm    = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
+        C_out     = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
         if ((A_rd_recv == NULL) || (A_trans == NULL) || (A_2dmm == NULL) ||
             (B_rd_recv == NULL) || (B_trans == NULL) || (B_2dmm == NULL) ||
             (C_2dmm == NULL) || (C_out  == NULL))
@@ -348,7 +372,9 @@ void ca3dmm_engine_init_BTB(
     const int n, const int k, 
     const int src_B_srow, const int src_B_nrow, 
     const int src_B_scol, const int src_B_ncol,
-    MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int dst_C_srow, const int dst_C_nrow,
+    const int dst_C_scol, const int dst_C_ncol,
+    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
 )
 {
     *engine_ = NULL;
@@ -365,8 +391,21 @@ void ca3dmm_engine_init_BTB(
     MPI_Comm_size(comm, &engine->n_proc);
     MPI_Comm_rank(comm, &engine->my_rank);
     int p = engine->n_proc;
-    int mp, np, kp, rp;
-    calc_3d_decomposition_nk(p, n, k, &np, &kp, &rp);
+    int mp, np, kp, rp, gen_proc_grid = 1;
+    if (proc_grid != NULL)
+    {
+        mp = proc_grid[0];
+        np = proc_grid[1];
+        kp = proc_grid[2];
+        rp = engine->n_proc - mp * np * kp;
+        if ((mp != np) || (rp < 0))
+        {
+            if (engine->my_rank == 0) printf("[WARNING] Invalid process grid specified: mp, np, kp = %d, %d, %d\n", mp, np, kp);
+        } else {
+            gen_proc_grid = 0;
+        }
+    }
+    if (gen_proc_grid) calc_3d_decomposition_nk(p, n, k, &np, &kp, &rp);
     mp = np;
     if ((mp < 1) || (np < 1) || (kp < 1) || (mp * np * kp > p))
     {
@@ -423,11 +462,11 @@ void ca3dmm_engine_init_BTB(
     int color_2dmm, color_C_rs;
     if (engine->is_active == 1)
     {
-        color_2dmm   = rank_k;
+        color_2dmm = rank_k;
         color_C_rs = rank_mn;
     } else {
         // 19241112 should be large enough
-        color_2dmm   = 19241112;
+        color_2dmm = 19241112;
         color_C_rs = 19241112;
     }
     MPI_Comm_split(comm, color_2dmm,   engine->my_rank, &engine->comm_2dmm);
@@ -461,9 +500,8 @@ void ca3dmm_engine_init_BTB(
         engine->C_2dmm_scol = task_n_spos + ce->C_scol;
         engine->C_2dmm_nrow = ce->C_nrow;
         engine->C_2dmm_ncol = ce->C_ncol;
-
-        engine->C_out_srow = engine->C_2dmm_srow;
-        engine->C_out_nrow = engine->C_2dmm_nrow;
+        engine->C_out_srow  = engine->C_2dmm_srow;
+        engine->C_out_nrow  = engine->C_2dmm_nrow;
         int C_out_scol, C_out_ncol;
         int *C_rs_recvcnts = (int *) malloc(sizeof(int) * task_k_num);
         for (int i = 0; i < task_k_num; i++)
@@ -490,11 +528,10 @@ void ca3dmm_engine_init_BTB(
         engine->C_2dmm_scol = 0;
         engine->C_2dmm_nrow = 0;
         engine->C_2dmm_ncol = 0;
-
-        engine->C_out_srow = 0;
-        engine->C_out_scol = 0;
-        engine->C_out_nrow = 0;
-        engine->C_out_ncol = 0;
+        engine->C_out_srow  = 0;
+        engine->C_out_scol  = 0;
+        engine->C_out_nrow  = 0;
+        engine->C_out_ncol  = 0;
         engine->C_rs_recvcnts = NULL;
     }  // End of "if (engine->is_active)"
 
@@ -506,7 +543,7 @@ void ca3dmm_engine_init_BTB(
     // (3) The input A and B matrices are column-major, mat_redist_engine uses row-major, so 
     //     we need to swap the parameters when calling mat_redist_engine_init().
     mat_redist_engine_init(
-        src_B_scol,     src_B_srow,     src_B_ncol,     src_B_nrow, 
+        src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         engine->B_2dmm_scol, engine->B_2dmm_srow, engine->B_2dmm_ncol, engine->B_2dmm_nrow, 
         comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
     );
@@ -514,6 +551,19 @@ void ca3dmm_engine_init_BTB(
     {
         ca3dmm_engine_free(&engine);
         return;
+    }
+    if (!((dst_C_srow == -1) || (dst_C_nrow == -1) || (dst_C_scol == -1) || (dst_C_ncol == -1)))
+    {
+        mat_redist_engine_init(
+            engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
+            dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C
+        );
+        if (engine->redist_C == NULL)
+        {
+            ca3dmm_engine_free(&engine);
+            return;
+        }
     }
 
     // 6. Allocate local matrix blocks
@@ -571,6 +621,7 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
     MPI_Comm_free(&engine->comm_2dmm);
     mat_redist_engine_free(&engine->redist_A);
     mat_redist_engine_free(&engine->redist_B);
+    mat_redist_engine_free(&engine->redist_C);
     cannon_engine_free(&engine->cannon_engine);
     free(engine);
     *engine_ = NULL;
@@ -578,8 +629,9 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
 
 // Perform Communication-Avoiding 3D Matrix Multiplication (CA3DMM)
 void ca3dmm_engine_exec(
-    const void *src_A, const int ldA, 
-    const void *src_B, const int ldB, 
+    const void *src_A, const int ldA,
+    const void *src_B, const int ldB,
+    void *dst_C, const int ldC,
     ca3dmm_engine_p engine
 )
 {
@@ -733,6 +785,12 @@ void ca3dmm_engine_exec(
         engine->reduce_ms += 1000.0 * (stop_t - start_t);
     }
 
+    start_t = MPI_Wtime();
+    if (engine->redist_C != NULL)
+        mat_redist_engine_exec(engine->redist_C, engine->C_out, engine->C_out_nrow, dst_C, ldC);
+    stop_t = MPI_Wtime();
+    engine->redist_ms += 1000.0 * (stop_t - start_t);
+
     exec_stop_t = MPI_Wtime();
     engine->exec_ms += 1000.0 * (exec_stop_t - exec_start_t);
     engine->n_exec++;
@@ -765,10 +823,10 @@ void ca3dmm_engine_print_stat(ca3dmm_engine_p engine)
     printf("* Initialization         : %.2f ms\n", engine->init_ms);
     printf("* Number of executions   : %d\n", engine->n_exec);
     printf("* Execution time (avg)   : %.2f ms\n", engine->exec_ms   / engine->n_exec);
-    printf("  * Redist. A & B        : %.2f ms\n", engine->redist_ms / engine->n_exec);
-    printf("  * Allgatherv A or B    : %.2f ms\n", engine->agvAB_ms  / engine->n_exec);
-    printf("  * 2D matmul            : %.2f ms\n", engine->cannon_ms / engine->n_exec);
-    printf("  * K-dim reduce-scatter : %.2f ms\n", engine->reduce_ms / engine->n_exec);
+    printf("  * Redistribute A, B, C : %.2f ms\n", engine->redist_ms / engine->n_exec);
+    printf("  * Allgather A or B     : %.2f ms\n", engine->agvAB_ms  / engine->n_exec);
+    printf("  * 2D Cannon execution  : %.2f ms\n", engine->cannon_ms / engine->n_exec);
+    printf("  * Reduce-scatter C     : %.2f ms\n", engine->reduce_ms / engine->n_exec);
     cannon_engine_print_stat(engine->cannon_engine);
     printf("============================================================\n");
 }
