@@ -534,6 +534,14 @@ void ca3dmm_engine_init_BTB(
         engine->C_out_ncol  = 0;
         engine->C_rs_recvcnts = NULL;
     }  // End of "if (engine->is_active)"
+    engine->A_rd_srow = engine->A_2dmm_srow;
+    engine->A_rd_scol = engine->A_2dmm_scol;
+    engine->A_rd_nrow = engine->A_2dmm_nrow;
+    engine->A_rd_ncol = engine->A_2dmm_ncol;
+    engine->B_rd_srow = engine->B_2dmm_srow;
+    engine->B_rd_scol = engine->B_2dmm_scol;
+    engine->B_rd_nrow = engine->B_2dmm_nrow;
+    engine->B_rd_ncol = engine->B_2dmm_ncol;
 
     // 5. Set up mat_redist_engine
     // (1) We only need to redistribute B globally, A (== B^T) block can be obtained

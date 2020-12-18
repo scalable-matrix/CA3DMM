@@ -203,33 +203,29 @@ int main(int argc, char **argv)
                 B_chk_jcol[i] = 0.11 * (double) global_i + 0.12 * (double) global_j;
             }
         }
-        if (ce->is_active)
-        {
-            CBLAS_TRANSPOSE A_trans = (trans_A) ? CblasTrans : CblasNoTrans;
-            CBLAS_TRANSPOSE B_trans = (trans_B) ? CblasTrans : CblasNoTrans;
-            cblas_dgemm(
-                CblasColMajor, A_trans, B_trans, C_chk_nrow, C_chk_ncol, k,
-                1.0, A_chk, A_chk_nrow, B_chk, B_chk_nrow, 0.0, C_chk, C_chk_nrow
-            );
-        }
+
+        CBLAS_TRANSPOSE A_trans = (trans_A) ? CblasTrans : CblasNoTrans;
+        CBLAS_TRANSPOSE B_trans = (trans_B) ? CblasTrans : CblasNoTrans;
+        cblas_dgemm(
+            CblasColMajor, A_trans, B_trans, C_chk_nrow, C_chk_ncol, k,
+            1.0, A_chk, A_chk_nrow, B_chk, B_chk_nrow, 0.0, C_chk, C_chk_nrow
+        );
+        
         int local_error = 0, total_error = 0;
-        if (ce->is_active)
+        for (int j = 0; j < C_chk_ncol; j++)
         {
-            for (int j = 0; j < C_chk_ncol; j++)
+            size_t out_offset = (size_t) j * (size_t) C_out_nrow;
+            size_t chk_offset = (size_t) j * (size_t) C_chk_nrow;
+            double *C_out_jcol = C_out + out_offset;
+            double *C_chk_jcol = C_chk + chk_offset;
+            for (int i = 0; i < C_chk_nrow; i++)
             {
-                size_t out_offset = (size_t) j * (size_t) C_out_nrow;
-                size_t chk_offset = (size_t) j * (size_t) C_chk_nrow;
-                double *C_out_jcol = C_out + out_offset;
-                double *C_chk_jcol = C_chk + chk_offset;
-                for (int i = 0; i < C_chk_nrow; i++)
-                {
-                    double diff = C_out_jcol[i] - C_chk_jcol[i];
-                    double relerr = fabs(diff / C_chk_jcol[i]);
-                    if (relerr > 1e-12) local_error++;
-                }
+                double diff = C_out_jcol[i] - C_chk_jcol[i];
+                double relerr = fabs(diff / C_chk_jcol[i]);
+                if (relerr > 1e-12) local_error++;
             }
         }
-        MPI_Reduce(&local_error, &total_error, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_error, &total_error, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
         if (my_rank == 0) printf("CA3DMM output : %d error(s)\n", total_error);
         free(A_chk);
         free(B_chk);
