@@ -96,6 +96,23 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     engine->B_recv = B_recv;
     engine->C_buff = C_buff;
 
+    const int left_col   = (rank_col - 1 + np_dim) % np_dim;
+    const int right_col  = (rank_col + 1) % np_dim;
+    const int upper_row  = (rank_row - 1 + np_dim) % np_dim;
+    const int lower_row  = (rank_row + 1) % np_dim;
+    const int left_rank  = rank_row  * np_dim + left_col;
+    const int right_rank = rank_row  * np_dim + right_col;
+    const int lower_rank = lower_row * np_dim + rank_col;
+    const int upper_rank = upper_row * np_dim + rank_col;
+    MPI_Send_init(A_gemm, max_A_blk_size, MPI_DOUBLE, left_rank,  0, comm, &engine->req_send_A[0]);
+    MPI_Send_init(A_recv, max_A_blk_size, MPI_DOUBLE, left_rank,  1, comm, &engine->req_send_A[1]);
+    MPI_Send_init(B_gemm, max_B_blk_size, MPI_DOUBLE, upper_rank, 0, comm, &engine->req_send_B[0]);
+    MPI_Send_init(B_recv, max_B_blk_size, MPI_DOUBLE, upper_rank, 1, comm, &engine->req_send_B[1]);
+    MPI_Recv_init(A_recv, max_A_blk_size, MPI_DOUBLE, right_rank, 0, comm, &engine->req_recv_A[0]);
+    MPI_Recv_init(A_gemm, max_A_blk_size, MPI_DOUBLE, right_rank, 1, comm, &engine->req_recv_A[1]);
+    MPI_Recv_init(B_recv, max_B_blk_size, MPI_DOUBLE, lower_rank, 0, comm, &engine->req_recv_B[0]);
+    MPI_Recv_init(B_gemm, max_B_blk_size, MPI_DOUBLE, lower_rank, 1, comm, &engine->req_recv_B[1]);
+
     double stop_t = MPI_Wtime();
     engine->init_ms = 1000.0 * (stop_t - start_t);
 
@@ -183,29 +200,19 @@ void cannon_engine_exec(
     const int A_dst_rank = rank_row   * np_dim + A_dst_col;
     const int B_dst_rank = B_dst_row  * np_dim + rank_col;
     start_t = MPI_Wtime();
-    MPI_Isend(A_blk,  A_m * A_send_k, MPI_DOUBLE, A_dst_rank, 1, comm, &A_send_req);
-    MPI_Isend(B_blk,  B_send_k * B_n, MPI_DOUBLE, B_dst_rank, 2, comm, &B_send_req);
-    MPI_Irecv(A_recv, A_m * A_recv_k, MPI_DOUBLE, A_src_rank, 1, comm, &A_recv_req);
-    MPI_Irecv(B_recv, B_recv_k * B_n, MPI_DOUBLE, B_src_rank, 2, comm, &B_recv_req);
-    MPI_Wait(&A_send_req, MPI_STATUS_IGNORE);
-    MPI_Wait(&B_send_req, MPI_STATUS_IGNORE);
-    MPI_Wait(&A_recv_req, MPI_STATUS_IGNORE);
-    MPI_Wait(&B_recv_req, MPI_STATUS_IGNORE);
+    MPI_Sendrecv(
+        A_blk,  A_m * A_send_k, MPI_DOUBLE, A_dst_rank, 0, 
+        A_recv, A_m * A_recv_k, MPI_DOUBLE, A_src_rank, 0, comm, MPI_STATUS_IGNORE
+    );
+    MPI_Sendrecv(
+        B_blk,  B_send_k * B_n, MPI_DOUBLE, B_dst_rank, 1, 
+        B_recv, B_recv_k * B_n, MPI_DOUBLE, B_src_rank, 1, comm, MPI_STATUS_IGNORE
+    );
     stop_t  = MPI_Wtime();
     engine->shift0_ms += 1000.0 * (stop_t - start_t);
 
     // Shift and multiply
-    const int max_A_blk_size = (m / np_dim + 1) * (k / np_dim + 1);
-    const int max_B_blk_size = (k / np_dim + 1) * (n / np_dim + 1);
-    const int max_C_blk_size = (m / np_dim + 1) * (n / np_dim + 1);
-    const int left_col   = (rank_col - 1 + np_dim) % np_dim;
-    const int right_col  = (rank_col + 1) % np_dim;
-    const int upper_row  = (rank_row - 1 + np_dim) % np_dim;
-    const int lower_row  = (rank_row + 1) % np_dim;
-    const int left_rank  = rank_row * np_dim + left_col;
-    const int right_rank = rank_row * np_dim + right_col;
-    const int lower_rank = lower_row * np_dim + rank_col;
-    const int upper_rank = upper_row * np_dim + rank_col;
+    MPI_Request *req_send_A_p, *req_send_B_p, *req_recv_A_p, *req_recv_B_p;
     int local_k = k_displs[src_offset + 1] - k_displs[src_offset];
     double *tmp_ptr;
     for (int i_step = 0; i_step < np_dim; i_step++)
@@ -213,18 +220,25 @@ void cannon_engine_exec(
         start_t = MPI_Wtime();
         if (i_step > 0)
         {
-            MPI_Wait(&A_send_req, MPI_STATUS_IGNORE);
-            MPI_Wait(&B_send_req, MPI_STATUS_IGNORE);
-            MPI_Wait(&A_recv_req, MPI_STATUS_IGNORE);
-            MPI_Wait(&B_recv_req, MPI_STATUS_IGNORE);
+            MPI_Wait(req_send_A_p, MPI_STATUS_IGNORE);
+            MPI_Wait(req_send_B_p, MPI_STATUS_IGNORE);
+            MPI_Wait(req_recv_A_p, MPI_STATUS_IGNORE);
+            MPI_Wait(req_recv_B_p, MPI_STATUS_IGNORE);
         }
         tmp_ptr = A_gemm; A_gemm = A_recv; A_recv = tmp_ptr;
         tmp_ptr = B_gemm; B_gemm = B_recv; B_recv = tmp_ptr;
 
-        MPI_Isend(A_gemm, max_A_blk_size, MPI_DOUBLE, left_rank,  i_step, comm, &A_send_req);
-        MPI_Isend(B_gemm, max_B_blk_size, MPI_DOUBLE, upper_rank, i_step, comm, &B_send_req);
-        MPI_Irecv(A_recv, max_A_blk_size, MPI_DOUBLE, right_rank, i_step, comm, &A_recv_req);
-        MPI_Irecv(B_recv, max_B_blk_size, MPI_DOUBLE, lower_rank, i_step, comm, &B_recv_req);
+        if (i_step < np_dim - 1)
+        {
+            req_send_A_p = &engine->req_send_A[(i_step + 1) % 2];
+            req_send_B_p = &engine->req_send_B[(i_step + 1) % 2];
+            req_recv_A_p = &engine->req_recv_A[(i_step + 1) % 2];
+            req_recv_B_p = &engine->req_recv_B[(i_step + 1) % 2];
+            MPI_Start(req_send_A_p);
+            MPI_Start(req_send_B_p);
+            MPI_Start(req_recv_A_p);
+            MPI_Start(req_recv_B_p);
+        }
         stop_t  = MPI_Wtime();
         engine->lshift_ms += 1000.0 * (stop_t - start_t);
 
