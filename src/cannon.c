@@ -23,20 +23,28 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
         fprintf(stderr, "[ERROR] Communicator size %d is not a square number\n", n_proc);
         return;
     }
-    int rank_row = my_rank / np_dim;
-    int rank_col = my_rank % np_dim;
 
     double start_t = MPI_Wtime();
+
+    MPI_Comm comm_cart;
+    int dims[2] = {np_dim, np_dim};
+    int periods[2] = {1, 1};
+    int rank_cart, coords[2];
+    MPI_Cart_create(comm, 2, dims, periods, 1, &comm_cart);
+    MPI_Comm_rank(comm_cart, &rank_cart);
+    MPI_Cart_coords(comm_cart, rank_cart, 2, &coords[0]);
+    int rank_row = coords[0];
+    int rank_col = coords[1];
 
     cannon_engine_p engine = (cannon_engine_p) malloc(sizeof(cannon_engine_s));
     engine->m         = m;
     engine->n         = n;
     engine->k         = k;
-    engine->my_rank   = my_rank;
+    engine->my_rank   = rank_cart;
     engine->rank_row  = rank_row;
     engine->rank_col  = rank_col;
     engine->np_dim    = np_dim;
-    engine->comm      = comm;
+    engine->comm      = comm_cart;
     engine->shift0_ms = 0.0;
     engine->lshift_ms = 0.0;
     engine->gemm_ms   = 0.0;
@@ -104,14 +112,14 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     const int right_rank = rank_row  * np_dim + right_col;
     const int lower_rank = lower_row * np_dim + rank_col;
     const int upper_rank = upper_row * np_dim + rank_col;
-    MPI_Send_init(A_gemm, max_A_blk_size, MPI_DOUBLE, left_rank,  0, comm, &engine->req_send_A[0]);
-    MPI_Send_init(A_recv, max_A_blk_size, MPI_DOUBLE, left_rank,  1, comm, &engine->req_send_A[1]);
-    MPI_Send_init(B_gemm, max_B_blk_size, MPI_DOUBLE, upper_rank, 0, comm, &engine->req_send_B[0]);
-    MPI_Send_init(B_recv, max_B_blk_size, MPI_DOUBLE, upper_rank, 1, comm, &engine->req_send_B[1]);
-    MPI_Recv_init(A_recv, max_A_blk_size, MPI_DOUBLE, right_rank, 0, comm, &engine->req_recv_A[0]);
-    MPI_Recv_init(A_gemm, max_A_blk_size, MPI_DOUBLE, right_rank, 1, comm, &engine->req_recv_A[1]);
-    MPI_Recv_init(B_recv, max_B_blk_size, MPI_DOUBLE, lower_rank, 0, comm, &engine->req_recv_B[0]);
-    MPI_Recv_init(B_gemm, max_B_blk_size, MPI_DOUBLE, lower_rank, 1, comm, &engine->req_recv_B[1]);
+    MPI_Send_init(A_gemm, max_A_blk_size, MPI_DOUBLE, left_rank,  0, comm_cart, &engine->req_send_A[0]);
+    MPI_Send_init(A_recv, max_A_blk_size, MPI_DOUBLE, left_rank,  1, comm_cart, &engine->req_send_A[1]);
+    MPI_Send_init(B_gemm, max_B_blk_size, MPI_DOUBLE, upper_rank, 0, comm_cart, &engine->req_send_B[0]);
+    MPI_Send_init(B_recv, max_B_blk_size, MPI_DOUBLE, upper_rank, 1, comm_cart, &engine->req_send_B[1]);
+    MPI_Recv_init(A_recv, max_A_blk_size, MPI_DOUBLE, right_rank, 0, comm_cart, &engine->req_recv_A[0]);
+    MPI_Recv_init(A_gemm, max_A_blk_size, MPI_DOUBLE, right_rank, 1, comm_cart, &engine->req_recv_A[1]);
+    MPI_Recv_init(B_recv, max_B_blk_size, MPI_DOUBLE, lower_rank, 0, comm_cart, &engine->req_recv_B[0]);
+    MPI_Recv_init(B_gemm, max_B_blk_size, MPI_DOUBLE, lower_rank, 1, comm_cart, &engine->req_recv_B[1]);
 
     double stop_t = MPI_Wtime();
     engine->init_ms = 1000.0 * (stop_t - start_t);
@@ -132,6 +140,7 @@ void cannon_engine_free(cannon_engine_p *engine_)
     free(engine->B_gemm);
     free(engine->B_recv);
     free(engine->C_buff);
+    MPI_Comm_free(&engine->comm);
     free(engine);
     *engine_ = NULL;
 }

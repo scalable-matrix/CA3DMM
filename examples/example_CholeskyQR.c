@@ -29,7 +29,10 @@ int main(int argc, char **argv)
     int B_ncol = get_int_param(argc, argv, 2,   500, 1, 16384);
     if (my_rank == 0) printf("Random matrix B size %d * %d\n", B_nrow, B_ncol);
 
-    // Query the ideal partitioning of B and grid size
+    // Query the ideal partitioning of B and grid size. External application can 
+    // organize all active processes (ce->is_active == 1) into a 2D grid by grouping
+    // all ranks with the same src_B_scol into a column communicator and all ranks
+    // with the same src_B_srow into a row communicator. 
     int src_B_srow, src_B_nrow, src_B_scol, src_B_ncol;
     int proc_grid[3];
     ca3dmm_engine_p ce;
@@ -44,6 +47,12 @@ int main(int argc, char **argv)
     proc_grid[0] = ce->mp;
     proc_grid[1] = ce->np;
     proc_grid[2] = ce->kp;
+    #if 0
+    printf(
+        "Rank %2d initial B block: [%d : %d, %d : %d]\n", my_rank,
+        src_B_srow, src_B_srow + src_B_nrow - 1, src_B_scol, src_B_scol + src_B_ncol - 1
+    );
+    #endif
     if (my_rank == 0) printf("CA3DMM process grid : %d * %d * %d\n", proc_grid[0], proc_grid[1], proc_grid[2]);
     ca3dmm_engine_free(&ce);
 
