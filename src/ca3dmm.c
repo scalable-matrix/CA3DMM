@@ -98,7 +98,7 @@ void ca3dmm_engine_init(
     engine->reduce_ms = 0.0;
     engine->n_exec    = 0;
 
-    // 2. Handle the task groups, note that both mp & np are powers of 2
+    // 2. Handle the task groups, note that max(mp, np) is a multiplier of min(mp, np)
     int rank_k  = engine->my_rank / (mp * np);
     int rank_mn = engine->my_rank % (mp * np);
     int rank_n  = rank_mn / mp;
@@ -469,7 +469,7 @@ void ca3dmm_engine_init_BTB(
         color_2dmm = 19241112;
         color_C_rs = 19241112;
     }
-    MPI_Comm_split(comm, color_2dmm,   engine->my_rank, &engine->comm_2dmm);
+    MPI_Comm_split(comm, color_2dmm, engine->my_rank, &engine->comm_2dmm);
     MPI_Comm_split(comm, color_C_rs, engine->my_rank, &engine->comm_C_rs);
 
     // 4. Calculate A, B, C block information

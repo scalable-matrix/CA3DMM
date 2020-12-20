@@ -12,11 +12,11 @@
 int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
-    srand48(time(NULL));
 
     int my_rank, n_proc;
     MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &n_proc);
+    srand48(time(NULL) + my_rank);
 
     if ((argc == 2) && ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)))
     {
@@ -44,6 +44,7 @@ int main(int argc, char **argv)
     proc_grid[0] = ce->mp;
     proc_grid[1] = ce->np;
     proc_grid[2] = ce->kp;
+    if (my_rank == 0) printf("CA3DMM process grid : %d * %d * %d\n", proc_grid[0], proc_grid[1], proc_grid[2]);
     ca3dmm_engine_free(&ce);
 
     // Allocate local B block and fill it with random number
@@ -86,6 +87,9 @@ int main(int argc, char **argv)
         S0_srow, S0_nrow, S0_scol, S0_ncol, &proc_grid[0], MPI_COMM_WORLD, &ce_S0_mat
     );
     ca3dmm_engine_exec(NULL, 0, B_in, src_B_nrow, S0, S0_nrow, ce_S0_mat);
+    mat_redist_engine_p S0_rdB = ce_S0_mat->redist_B;
+    if ((S0_rdB->n_proc_send > 1) || (S0_rdB->n_proc_recv > 1))
+        printf("Oh no, rank %d need to send/recv B_orth to/from other processes in computing S1 = B_orth^T * B_orth!\n", my_rank);
 
     // Rank 0 calculate Rinv = inv(chol(S0, 'upper')) and store it in S0
     if (my_rank == 0)
@@ -110,8 +114,8 @@ int main(int argc, char **argv)
     }
 
     // Compute B_orth = B * Rinv, B_orth has the same partition as B
-    // Notice: need to swap the proc_grid from [np, np, kp] to [kp, np, np] to 
-    // reuse the layout of B and get the same B_orth layout
+    // If np > 1, we cannot reuse the initial layout of B, so swapping the
+    // process grid from [np, np, kp] to [kp, np, np] might be unnecessary
     ca3dmm_engine_p ce_Borth_mat;
     proc_grid[0] = proc_grid[2];
     proc_grid[2] = proc_grid[1];
@@ -123,13 +127,11 @@ int main(int argc, char **argv)
         &proc_grid[0], MPI_COMM_WORLD, &ce_Borth_mat
     );
     ca3dmm_engine_exec(B_in, src_B_nrow, S0, S0_nrow, B_orth, src_B_nrow, ce_Borth_mat);
-    mat_redist_engine_p Borth_rdA = ce_Borth_mat->redist_A;
-    if ((Borth_rdA->n_proc_send > 1) || (Borth_rdA->n_proc_recv > 1))
-        printf("Oh no, rank %d need to send/recv B to/from other processes in computing B_orth = B * invR!\n", my_rank);
 
     // Compute S1 = B_orth^T * B_orth and check the correctness
     // Notice: need to swap the proc_grid from [kp, np, np] to [np, np, kp] to 
-    // reuse the layout of B_orth layout
+    // reuse the layout of B_orth layout. The Rayleigh-Ritz procedure does not
+    // have a similar step.
     proc_grid[2] = proc_grid[0];
     proc_grid[0] = proc_grid[1];
     ca3dmm_engine_p ce_S1_mat;

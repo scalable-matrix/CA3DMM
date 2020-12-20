@@ -43,8 +43,8 @@ struct ca3dmm_engine
     void *B_2dmm;                   // Size B_2dmm_nrow * B_2dmm_ncol, initial op(B) matrix block required in 2D matmul
     void *C_2dmm;                   // Size C_2dmm_nrow * C_2dmm_ncol, 2D matmul result C matrix block
     void *C_out;                    // Size C_out_nrow  * C_out_ncol,  output C matrix block
-    MPI_Comm comm_AB_agv;           // Communicator for m or n dimension broadcast
-    MPI_Comm comm_C_rs;             // Communicator for k dimension reduction
+    MPI_Comm comm_AB_agv;           // Communicator for A or B matrix block MPI_Allgatherv
+    MPI_Comm comm_C_rs;             // Communicator for C matrix reduce-scatter
     MPI_Comm comm_2dmm;             // Communicator for 2D matmul in each k_task
     mat_redist_engine_p redist_A;   // Redistribution of A matrix from its initial layout to CA3DMM required layout
     mat_redist_engine_p redist_B;   // Redistribution of B matrix from its initial layout to CA3DMM required layout
