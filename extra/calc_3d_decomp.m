@@ -129,7 +129,7 @@ function proc_grid = fixed_pair_scale_grid(p, size_grid, perfect_grid, fixed_pai
             vol1     = prod(sg_proc1);
             surf1    = sg_proc1(1) * sg_proc1(2) + sg_proc1(1) * sg_proc1(3) + sg_proc1(2) * sg_proc1(3);
             surfsum1 = surf1 * prod(proc_grid1);
-            if ((min(proc_grid1) < 1) || (vol1 / perfect_vol > 1.1) || ...
+            if ((min(proc_grid1) < 1) || (vol1 / perfect_vol > 1.25) || ...
                 (max(sg_proc1)/min(sg_proc1) >= 4.0))
                continue;
             end

@@ -96,7 +96,7 @@ void fixed_pair_scale_grid(
             surf1 = sg_proc1[0] * sg_proc1[1] + sg_proc1[0] * sg_proc1[2] + sg_proc1[1] * sg_proc1[2];
             surfsum1 = surfsum1 * surf1;
             if ((proc_grid1[0]) < 1 || (proc_grid1[1] < 1) || (proc_grid1[2] < 1)) continue;
-            if (vol1 / perfect_vol > 1.1) continue;
+            if (vol1 / perfect_vol > 1.25) continue;
             if (max_min_ratio(3, sg_proc1) >= 4.0) continue;
             if (vol1 < min_vol)
             {
