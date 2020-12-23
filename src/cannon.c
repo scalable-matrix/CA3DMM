@@ -37,6 +37,7 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     int rank_col = coords[1];
 
     cannon_engine_p engine = (cannon_engine_p) malloc(sizeof(cannon_engine_s));
+    memset(engine, 0, sizeof(cannon_engine_s));
     engine->m         = m;
     engine->n         = n;
     engine->k         = k;
@@ -121,10 +122,46 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     MPI_Recv_init(B_recv, max_B_blk_size, MPI_DOUBLE, lower_rank, 0, comm_cart, &engine->req_recv_B[0]);
     MPI_Recv_init(B_gemm, max_B_blk_size, MPI_DOUBLE, lower_rank, 1, comm_cart, &engine->req_recv_B[1]);
 
+    int  min_k_blk_size  = 140;
+    int  curr_k_blk_size = engine->A_ncol;
+    int  gemm_cycle   = 1;
+    void *A_stack = NULL, *B_stack = NULL;
+    char *min_k_blk_size_p = getenv("CANNON_MIN_K_BLK_SIZE");
+    if (min_k_blk_size_p != NULL) min_k_blk_size = atoi(min_k_blk_size_p);
+    if (min_k_blk_size < 8) min_k_blk_size = 8;
+    if (curr_k_blk_size < min_k_blk_size)
+    {
+        gemm_cycle = (min_k_blk_size + curr_k_blk_size - 1) / curr_k_blk_size;
+        if (gemm_cycle > np_dim) gemm_cycle = np_dim;
+        A_stack = malloc(sizeof(double) * max_A_blk_size * gemm_cycle);
+        B_stack = malloc(sizeof(double) * max_B_blk_size * gemm_cycle);
+    }
+    engine->gemm_cycle = gemm_cycle;
+    engine->A_stack = A_stack;
+    engine->B_stack = B_stack;
+
     double stop_t = MPI_Wtime();
     engine->init_ms = 1000.0 * (stop_t - start_t);
 
     *engine_ = engine;
+}
+
+static void copy_matrix_block(
+    const size_t dt_size, const int nrow, const int ncol, 
+    const void *src, const int lds, void *dst, const int ldd
+)
+{
+    const char *src_ = (char*) src;
+    char *dst_ = (char*) dst;
+    const size_t lds_ = dt_size * (size_t) lds;
+    const size_t ldd_ = dt_size * (size_t) ldd;
+    const size_t row_msize = dt_size * (size_t) ncol;
+    for (int irow = 0; irow < nrow; irow++)
+    {
+        size_t src_offset = (size_t) irow * lds_;
+        size_t dst_offset = (size_t) irow * ldd_;
+        memcpy(dst_ + dst_offset, src_ + src_offset, row_msize);
+    }
 }
 
 // Free a cannon_engine
@@ -137,26 +174,28 @@ void cannon_engine_free(cannon_engine_p *engine_)
     free(engine->k_displs);
     free(engine->A_gemm);
     free(engine->A_recv);
+    free(engine->A_stack);
     free(engine->B_gemm);
     free(engine->B_recv);
+    free(engine->B_stack);
     free(engine->C_buff);
     MPI_Comm_free(&engine->comm);
+    for (int i = 0; i < 1; i++)
+    {
+        MPI_Request_free(&engine->req_send_A[i]);
+        MPI_Request_free(&engine->req_send_B[i]);
+        MPI_Request_free(&engine->req_recv_A[i]);
+        MPI_Request_free(&engine->req_recv_B[i]);
+    }
     free(engine);
     *engine_ = NULL;
 }
 
-// Compute C := alpha * A * B + beta * C using 2D Cannon matrix multiplication algorithm
-void cannon_engine_exec(
+void cannon_engine_exec_cc1(
     const double alpha, const double *A_blk, const double *B_blk, 
     const double beta, double *C_blk, cannon_engine_p engine
 )
 {
-    if (engine == NULL)
-    {
-        fprintf(stderr, "[ERROR] canon_engine not initialized\n");
-        return;
-    }
-
     const int m         = engine->m;
     const int n         = engine->n;
     const int k         = engine->k;
@@ -174,24 +213,6 @@ void cannon_engine_exec(
     MPI_Comm comm = engine->comm;
 
     double exec_start_t, exec_stop_t, start_t, stop_t;
-
-    if (np_dim == 1)
-    {
-        start_t = MPI_Wtime();
-        cblas_dgemm(
-            CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, k, 
-            alpha, A_blk, m, B_blk, k, beta, C_blk, m
-        );
-        stop_t  = MPI_Wtime();
-        engine->gemm_ms += 1000.0 * (stop_t - start_t);
-        engine->exec_ms += 1000.0 * (stop_t - start_t);
-        engine->n_exec++;
-        return;
-    }
-
-    
-    MPI_Request A_send_req, A_recv_req, B_send_req, B_recv_req;
-
     exec_start_t = MPI_Wtime();
 
     // Initial alignment
@@ -272,6 +293,192 @@ void cannon_engine_exec(
     exec_stop_t = MPI_Wtime();
     engine->exec_ms += 1000.0 * (exec_stop_t - exec_start_t);
     engine->n_exec++;
+}
+
+void cannon_engine_exec_cck(
+    const double alpha, const double *A_blk, const double *B_blk, 
+    const double beta, double *C_blk, cannon_engine_p engine
+)
+{
+    const int m          = engine->m;
+    const int n          = engine->n;
+    const int k          = engine->k;
+    const int rank_row   = engine->rank_row;
+    const int rank_col   = engine->rank_col;
+    const int np_dim     = engine->np_dim;
+    const int gemm_cycle = engine->gemm_cycle;
+    const int *m_displs  = engine->m_displs;
+    const int *n_displs  = engine->n_displs;
+    const int *k_displs  = engine->k_displs;
+    double *A_gemm  = (double *) engine->A_gemm;
+    double *A_recv  = (double *) engine->A_recv;
+    double *A_stack = (double *) engine->A_stack;
+    double *B_gemm  = (double *) engine->B_gemm;
+    double *B_recv  = (double *) engine->B_recv;
+    double *B_stack = (double *) engine->B_stack;
+    double *C_buff  = (double *) engine->C_buff;
+    MPI_Comm comm = engine->comm;
+
+    double exec_start_t, exec_stop_t, start_t, stop_t;
+    exec_start_t = MPI_Wtime();
+
+    // Initial alignment
+    int src_offset = (rank_row + rank_col) % np_dim;
+    const int A_dst_col  = (rank_col - rank_row + np_dim) % np_dim;
+    const int B_dst_row  = (rank_row - rank_col + np_dim) % np_dim;
+    const int A_m        = m_displs[rank_row   + 1] - m_displs[rank_row];
+    const int A_send_k   = k_displs[rank_col   + 1] - k_displs[rank_col];
+    const int A_recv_k   = k_displs[src_offset + 1] - k_displs[src_offset];
+    const int B_send_k   = k_displs[rank_row   + 1] - k_displs[rank_row];
+    const int B_recv_k   = k_displs[src_offset + 1] - k_displs[src_offset];
+    const int B_n        = n_displs[rank_col   + 1] - n_displs[rank_col];
+    const int A_src_rank = rank_row   * np_dim + src_offset;
+    const int B_src_rank = src_offset * np_dim + rank_col;
+    const int A_dst_rank = rank_row   * np_dim + A_dst_col;
+    const int B_dst_rank = B_dst_row  * np_dim + rank_col;
+    const int ldAs       = A_m;
+    const int ldBs       = (k / np_dim + 1) * gemm_cycle;
+    int k_stack_size = 0;
+    start_t = MPI_Wtime();
+    MPI_Sendrecv(
+        A_blk,  A_m * A_send_k, MPI_DOUBLE, A_dst_rank, 0, 
+        A_recv, A_m * A_recv_k, MPI_DOUBLE, A_src_rank, 0, comm, MPI_STATUS_IGNORE
+    );
+    MPI_Sendrecv(
+        B_blk,  B_send_k * B_n, MPI_DOUBLE, B_dst_rank, 1, 
+        B_recv, B_recv_k * B_n, MPI_DOUBLE, B_src_rank, 1, comm, MPI_STATUS_IGNORE
+    );
+    copy_matrix_block(
+        sizeof(double), A_recv_k, A_m, 
+        A_recv, A_m, A_stack + k_stack_size * A_m, ldAs
+    );
+    copy_matrix_block(
+        sizeof(double), B_n, B_recv_k, 
+        B_recv, B_recv_k, B_stack + k_stack_size, ldBs
+    );
+    k_stack_size += A_recv_k;
+    MPI_Barrier(comm);
+    stop_t  = MPI_Wtime();
+    engine->shift0_ms += 1000.0 * (stop_t - start_t);
+
+    // Shift and multiply
+    MPI_Request *req_send_A_p, *req_send_B_p, *req_recv_A_p, *req_recv_B_p;
+    int local_k = k_displs[src_offset + 1] - k_displs[src_offset];
+    double *tmp_ptr;
+    int gemm_step = 0;
+    for (int i_step = 0; i_step < np_dim; i_step++)
+    {
+        start_t = MPI_Wtime();
+        if (i_step > 0)
+        {
+            MPI_Wait(req_send_A_p, MPI_STATUS_IGNORE);
+            MPI_Wait(req_send_B_p, MPI_STATUS_IGNORE);
+            MPI_Wait(req_recv_A_p, MPI_STATUS_IGNORE);
+            MPI_Wait(req_recv_B_p, MPI_STATUS_IGNORE);
+            copy_matrix_block(
+                sizeof(double), local_k, A_m, 
+                A_recv, A_m, A_stack + k_stack_size * A_m, ldAs
+            );
+            copy_matrix_block(
+                sizeof(double), B_n, local_k, 
+                B_recv, local_k, B_stack + k_stack_size, ldBs
+            );
+            k_stack_size += local_k;
+        }
+        tmp_ptr = A_gemm; A_gemm = A_recv; A_recv = tmp_ptr;
+        tmp_ptr = B_gemm; B_gemm = B_recv; B_recv = tmp_ptr;
+
+        if (i_step < np_dim - 1)
+        {
+            req_send_A_p = &engine->req_send_A[(i_step + 1) % 2];
+            req_send_B_p = &engine->req_send_B[(i_step + 1) % 2];
+            req_recv_A_p = &engine->req_recv_A[(i_step + 1) % 2];
+            req_recv_B_p = &engine->req_recv_B[(i_step + 1) % 2];
+            MPI_Start(req_send_A_p);
+            MPI_Start(req_send_B_p);
+            MPI_Start(req_recv_A_p);
+            MPI_Start(req_recv_B_p);
+        }
+        stop_t  = MPI_Wtime();
+        engine->lshift_ms += 1000.0 * (stop_t - start_t);
+
+        start_t = MPI_Wtime();
+        if ((i_step + 1) % gemm_cycle == 0)
+        {
+            double beta  = (gemm_step == 0) ? 0.0 : 1.0;
+            double alpha = 1.0;
+            cblas_dgemm(
+                CblasColMajor, CblasNoTrans, CblasNoTrans, A_m, B_n, k_stack_size, 
+                alpha, A_stack, ldAs, B_stack, ldBs, beta, C_buff, A_m
+            );
+            gemm_step++;
+            k_stack_size = 0;
+        }
+        src_offset = (src_offset + 1) % np_dim;
+        local_k = k_displs[src_offset + 1] - k_displs[src_offset];
+        stop_t  = MPI_Wtime();
+        engine->gemm_ms += 1000.0 * (stop_t - start_t);
+    }
+
+    if (k_stack_size > 0)
+    {
+        double beta  = (gemm_step == 0) ? 0.0 : 1.0;
+        double alpha = 1.0;
+        cblas_dgemm(
+            CblasColMajor, CblasNoTrans, CblasNoTrans, A_m, B_n, k_stack_size, 
+            alpha, A_stack, ldAs, B_stack, ldBs, beta, C_buff, A_m
+        );
+        gemm_step++;
+        k_stack_size = 0;
+    }
+
+    // Accumulate to final output
+    for (int i = 0; i < A_m * B_n; i++)
+        C_blk[i] = alpha * C_buff[i] + beta * C_blk[i];
+
+    exec_stop_t = MPI_Wtime();
+    engine->exec_ms += 1000.0 * (exec_stop_t - exec_start_t);
+    engine->n_exec++;
+}
+
+// Compute C := alpha * A * B + beta * C using 2D Cannon matrix multiplication algorithm
+void cannon_engine_exec(
+    const double alpha, const double *A_blk, const double *B_blk, 
+    const double beta, double *C_blk, cannon_engine_p engine
+)
+{
+    if (engine == NULL)
+    {
+        fprintf(stderr, "[ERROR] canon_engine not initialized\n");
+        return;
+    }
+
+    const int m = engine->m;
+    const int n = engine->n;
+    const int k = engine->k;
+    
+    if (m == 0 || n == 0 || k == 0) return;
+
+    if (engine->np_dim == 1)
+    {
+        double start_t = MPI_Wtime();
+        cblas_dgemm(
+            CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, k, 
+            alpha, A_blk, m, B_blk, k, beta, C_blk, m
+        );
+        double stop_t  = MPI_Wtime();
+        engine->gemm_ms += 1000.0 * (stop_t - start_t);
+        engine->exec_ms += 1000.0 * (stop_t - start_t);
+        engine->n_exec++;
+        return;
+    }
+
+    if (engine->gemm_cycle == 1)
+    {
+        cannon_engine_exec_cc1(alpha, A_blk, B_blk, beta, C_blk, engine);
+    } else {
+        cannon_engine_exec_cck(alpha, A_blk, B_blk, beta, C_blk, engine);
+    }
 }
 
 // Reset the statistic data of a cannon_engine (not a collective call)

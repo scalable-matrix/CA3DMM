@@ -138,12 +138,54 @@ int main(int argc, char **argv)
     ca3dmm_engine_reset_stat(ce);
 
     // Timing running
-    for (int itest = 0; itest < n_test; itest++)
+    double *redist_mss = (double *) malloc(sizeof(double) * n_test);
+    double *agvAB_mss  = (double *) malloc(sizeof(double) * n_test);
+    double *cannon_mss = (double *) malloc(sizeof(double) * n_test);
+    double *reduce_mss = (double *) malloc(sizeof(double) * n_test);
+    double *matmul_mss = (double *) malloc(sizeof(double) * n_test);
+    double *exec_mss   = (double *) malloc(sizeof(double) * n_test);
+    double redist_ms = 0.0, agvAB_ms = 0.0, cannon_ms = 0.0;
+    double reduce_ms = 0.0, exec_ms = 0.0;
+    for (int i = 0; i < n_test; i++)
     {
         MPI_Barrier(MPI_COMM_WORLD);
         ca3dmm_engine_exec(A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow, ce);
+        redist_mss[i] = ce->redist_ms - redist_ms;
+        agvAB_mss[i]  = ce->agvAB_ms  - agvAB_ms;
+        cannon_mss[i] = ce->cannon_ms - cannon_ms;
+        reduce_mss[i] = ce->reduce_ms - reduce_ms;
+        exec_mss[i]   = ce->exec_ms   - exec_ms;
+        matmul_mss[i] = agvAB_mss[i] + cannon_mss[i] + reduce_mss[i];
+        redist_ms = ce->redist_ms;
+        agvAB_ms  = ce->agvAB_ms;
+        cannon_ms = ce->cannon_ms;
+        reduce_ms = ce->reduce_ms;
+        exec_ms   = ce->exec_ms;
+
     }
-    if (my_rank == 0) ca3dmm_engine_print_stat(ce);
+    if (my_rank == 0)
+    {
+        printf("\nA, B, C redist   : ");
+        for (int i = 0; i < n_test; i++) printf("%.0lf ", redist_mss[i]);
+        printf("\nA / B allgather  : ");
+        for (int i = 0; i < n_test; i++) printf("%.0lf ", agvAB_mss[i]);
+        printf("\n2D Cannon        : ");
+        for (int i = 0; i < n_test; i++) printf("%.0lf ", cannon_mss[i]);
+        printf("\nC reduce-scatter : ");
+        for (int i = 0; i < n_test; i++) printf("%.0lf ", reduce_mss[i]);
+        printf("\nmatmul only      : ");
+        for (int i = 0; i < n_test; i++) printf("%.0lf ", matmul_mss[i]);
+        printf("\ntotal execution  : ");
+        for (int i = 0; i < n_test; i++) printf("%.0lf ", exec_mss[i]);
+        printf("\n\n");
+        ca3dmm_engine_print_stat(ce);
+    }
+    free(redist_mss);
+    free(agvAB_mss);
+    free(cannon_mss);
+    free(reduce_mss);
+    free(matmul_mss);
+    free(exec_mss);
 
     // Check the correctness of the result
     if (chk_res)

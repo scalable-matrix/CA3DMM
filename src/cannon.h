@@ -16,13 +16,16 @@ struct cannon_engine
     int  A_nrow, A_ncol;        // Number of rows & cols of A matrix block needed by this MPI process
     int  B_nrow, B_ncol;        // Number of rows & cols of B matrix block needed by this MPI process
     int  C_nrow, C_ncol;        // Number of rows & cols of C matrix block calculated by this MPI process
+    int  gemm_cycle;            // Number of P2P shift steps before a local GEMM compute
     int  *m_displs;             // Size np_dim+1, partitioning displacements on the m dimension
     int  *n_displs;             // Size np_dim+1, partitioning displacements on the n dimension
     int  *k_displs;             // Size np_dim+1, partitioning displacements on the k dimension
     void *A_gemm;               // Size (m/np_dim + 1) * (k/np_dim + 1), A block GEMM buffer
     void *A_recv;               // Size (m/np_dim + 1) * (k/np_dim + 1), A block receive buffer
+    void *A_stack;              // Size (m/np_dim + 1) * (k/np_dim + 1) * gemm_cycle, stacked A blocks
     void *B_gemm;               // Size (k/np_dim + 1) * (n/np_dim + 1), B block GEMM buffer
     void *B_recv;               // Size (k/np_dim + 1) * (n/np_dim + 1), B block receive buffer
+    void *B_stack;              // Size (k/np_dim + 1) * (n/np_dim + 1) * gemm_cycle, stacked B blocks
     void *C_buff;               // Size (m/np_dim + 1) * (n/np_dim + 1), C block result buffer
     MPI_Comm    comm;           // Target MPI communicator
     MPI_Request req_send_A[2];  // MPI requests for sending   A to   left  rank
