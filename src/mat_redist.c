@@ -319,4 +319,6 @@ void mat_redist_engine_exec(
         char *i_recv_dst = dst_blk_ + dt_size * (local_srow * dst_ld + local_scol);
         copy_matrix_block(dt_size, i_recv_nrow, i_recv_ncol, i_recv_buf, i_recv_ncol, i_recv_dst, dst_ld);
     }  // End of recv_cnt loop
+
+    MPI_Barrier(engine->comm);
 }

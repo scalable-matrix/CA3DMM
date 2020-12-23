@@ -217,6 +217,7 @@ void cannon_engine_exec(
         B_blk,  B_send_k * B_n, MPI_DOUBLE, B_dst_rank, 1, 
         B_recv, B_recv_k * B_n, MPI_DOUBLE, B_src_rank, 1, comm, MPI_STATUS_IGNORE
     );
+    MPI_Barrier(comm);
     stop_t  = MPI_Wtime();
     engine->shift0_ms += 1000.0 * (stop_t - start_t);
 

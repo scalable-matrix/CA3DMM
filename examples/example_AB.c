@@ -139,7 +139,10 @@ int main(int argc, char **argv)
 
     // Timing running
     for (int itest = 0; itest < n_test; itest++)
+    {
+        MPI_Barrier(MPI_COMM_WORLD);
         ca3dmm_engine_exec(A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow, ce);
+    }
     if (my_rank == 0) ca3dmm_engine_print_stat(ce);
 
     // Check the correctness of the result

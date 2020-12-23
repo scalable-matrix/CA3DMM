@@ -20,6 +20,7 @@ struct ca3dmm_engine
     int  task_n_num, task_n_id;     // Total number and index of n dimension task (task_m_id  and task_n_id  cannot both > 0)
     int  task_k_num, task_k_id;     // Total number and index of k dimension task
     int  is_BTB;                    // If this ca3dmm_engine is to compute B^T * B
+    int  use_ag, use_rsb;           // If we can use MPI_Allgather/MPI_Reduce_scatter_block instead of MPI_Allgatherv/MPI_Reduce_scatter
     int  A_rd_srow,   A_rd_scol;    // 1st row & col of op(A) matrix block needed by this MPI process in redistribution
     int  B_rd_srow,   B_rd_scol;    // 1st row & col of op(B) matrix block needed by this MPI process in redistribution
     int  A_2dmm_srow, A_2dmm_scol;  // 1st row & col of op(A) matrix block needed by this MPI process in 2D matmul
@@ -52,6 +53,7 @@ struct ca3dmm_engine
     cannon_engine_p cannon_engine;  // cannon_engine for 2D matmul
 
     // Statistic data
+    int    print_timing;            // If rank 0 should print timing in each ca3dmm_engine_exec
     double init_ms;                 // Time (milliseconds) used in initialization
     double redist_ms;               // Time (milliseconds) used in redistribution of A and B
     double agvAB_ms;                // Time (milliseconds) used in MPI_Allgatherv of A or B

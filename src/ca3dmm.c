@@ -194,11 +194,13 @@ void ca3dmm_engine_init(
         engine->C_2dmm_ncol = ce->C_ncol;
         engine->C_out_srow  = engine->C_2dmm_srow;
         engine->C_out_nrow  = engine->C_2dmm_nrow;
-        int C_out_scol, C_out_ncol;
+        int C_out_scol, C_out_ncol, use_rsb = 1, C_out_ncol0 = -1;
         int *C_rs_recvcnts = (int *) malloc(sizeof(int) * task_k_num);
         for (int i = 0; i < task_k_num; i++)
         {
             calc_block_size_pos(engine->C_2dmm_ncol, task_k_num, i, &C_out_ncol, &C_out_scol);
+            if (C_out_ncol0 == -1) C_out_ncol0 = C_out_ncol;
+            if (C_out_ncol0 != C_out_ncol) use_rsb = 0;
             C_rs_recvcnts[i] = C_out_ncol * engine->C_2dmm_nrow;
             if (i == task_k_id)
             {
@@ -207,6 +209,7 @@ void ca3dmm_engine_init(
             }
         }
         engine->C_rs_recvcnts = C_rs_recvcnts;
+        engine->use_rsb = use_rsb;
     } else {
         engine->A_2dmm_srow = 0;
         engine->A_2dmm_scol = 0;
@@ -248,10 +251,12 @@ void ca3dmm_engine_init(
     memset(AB_agv_displs, 0, sizeof(int) * task_mn_num);
     if (task_n_num > 1)  // A block need to be duplicated
     {
-        int scol, ncol;
+        int scol, ncol, use_ag = 1, ncol0 = -1;
         for (int i = 0; i < task_n_num; i++)
         {
             calc_block_size_pos(engine->A_2dmm_ncol, task_n_num, i, &ncol, &scol);
+            if (ncol0 == -1) ncol0 = ncol;
+            if (ncol0 != ncol) use_ag = 0;
             AB_agv_recvcnts[i] = ncol * engine->A_2dmm_nrow;
             AB_agv_displs[i + 1] = AB_agv_displs[i] + AB_agv_recvcnts[i];
             if (i == task_n_id)
@@ -260,13 +265,16 @@ void ca3dmm_engine_init(
                 A_rd_ncol = ncol;
             }
         }
+        engine->use_ag = use_ag;
     }
     if (task_m_num > 1)  // B block need to be duplicated
     {
-        int scol, ncol;
+        int scol, ncol, use_ag = 1, ncol0 = -1;
         for (int i = 0; i < task_m_num; i++)
         {
             calc_block_size_pos(engine->B_2dmm_ncol, task_m_num, i, &ncol, &scol);
+            if (ncol0 == -1) ncol0 = ncol;
+            if (ncol0 != ncol) use_ag = 0;
             AB_agv_recvcnts[i] = ncol * engine->B_2dmm_nrow;
             AB_agv_displs[i + 1] = AB_agv_displs[i] + AB_agv_recvcnts[i];
             if (i == task_m_id)
@@ -275,6 +283,7 @@ void ca3dmm_engine_init(
                 B_rd_ncol = ncol;
             }
         }
+        engine->use_ag = use_ag;
     }
     engine->A_rd_srow = A_rd_srow;
     engine->A_rd_scol = A_rd_scol;
@@ -360,6 +369,12 @@ void ca3dmm_engine_init(
     engine->B_trans   = B_trans;
     engine->C_2dmm    = C_2dmm;
     engine->C_out     = C_out;
+
+    char *print_timing_p = getenv("CA3DMM_PRINT_TIMING");
+    int print_timing;
+    if (print_timing_p != NULL) print_timing = atoi(print_timing_p);
+    if (engine->my_rank == 0 && print_timing == 1) engine->print_timing = 1;
+    else engine->print_timing = 0;
 
     double stop_t = MPI_Wtime();
     engine->init_ms = 1000.0 * (stop_t - start_t);
@@ -502,11 +517,13 @@ void ca3dmm_engine_init_BTB(
         engine->C_2dmm_ncol = ce->C_ncol;
         engine->C_out_srow  = engine->C_2dmm_srow;
         engine->C_out_nrow  = engine->C_2dmm_nrow;
-        int C_out_scol, C_out_ncol;
+        int C_out_scol, C_out_ncol, use_rsb = 1, C_out_ncol0 = -1;
         int *C_rs_recvcnts = (int *) malloc(sizeof(int) * task_k_num);
         for (int i = 0; i < task_k_num; i++)
         {
             calc_block_size_pos(engine->C_2dmm_ncol, task_k_num, i, &C_out_ncol, &C_out_scol);
+            if (C_out_ncol0 == -1) C_out_ncol0 = C_out_ncol;
+            if (C_out_ncol0 != C_out_ncol) use_rsb = 0;
             C_rs_recvcnts[i] = C_out_ncol * engine->C_2dmm_nrow;
             if (i == task_k_id)
             {
@@ -515,6 +532,7 @@ void ca3dmm_engine_init_BTB(
             }
         }
         engine->C_rs_recvcnts = C_rs_recvcnts;
+        engine->use_rsb = use_rsb;
     } else {
         engine->A_2dmm_srow = 0;
         engine->A_2dmm_scol = 0;
@@ -602,6 +620,12 @@ void ca3dmm_engine_init_BTB(
     engine->C_2dmm    = C_2dmm;
     engine->C_out     = C_out;
 
+    char *print_timing_p = getenv("CA3DMM_PRINT_TIMING");
+    int print_timing;
+    if (print_timing_p != NULL) print_timing = atoi(print_timing_p);
+    if (engine->my_rank == 0 && print_timing == 1) engine->print_timing = 1;
+    else engine->print_timing = 0;
+
     double stop_t = MPI_Wtime();
     engine->init_ms = 1000.0 * (stop_t - start_t);
 
@@ -671,6 +695,7 @@ void ca3dmm_engine_exec(
     double *C_out     = (double *) engine->C_out;
 
     double start_t, stop_t, exec_start_t, exec_stop_t;
+    double redist_ms, agvAB_ms, cannon_ms, reduce_ms, exec_ms;
     
     exec_start_t = MPI_Wtime();
 
@@ -690,7 +715,9 @@ void ca3dmm_engine_exec(
         mat_redist_engine_exec(engine->redist_A, src_A, ldA, A_rd_recv, recv_ldA);
         mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_rd_recv, recv_ldB);
         stop_t = MPI_Wtime();
-        engine->redist_ms += 1000.0 * (stop_t - start_t);
+        redist_ms = 1000.0 * (stop_t - start_t);
+        engine->redist_ms += redist_ms;
+        if (engine->print_timing) printf("[INFO] Redistribute A & B time = %.2f ms\n", redist_ms);
 
         // Local transpose the received A & B blocks before MPI_allgatherv and Cannon2D.
         // Cannon 2D calls DGEMM with the parameters of no-transpose for both A & B block, 
@@ -719,32 +746,52 @@ void ca3dmm_engine_exec(
         else B_trans = B_rd_recv;
 
         // Allgatherv A or B to make it complete
-        start_t = MPI_Wtime();
         if (engine->task_m_num > 1)
         {
-            MPI_Allgatherv(
-                B_trans, B_rd_nrow * B_rd_ncol, MPI_DOUBLE, B_2dmm, 
-                AB_agv_recvcnts, AB_agv_displs, MPI_DOUBLE, engine->comm_AB_agv
-            );
+            if (engine->use_ag)
+            {
+                MPI_Allgather(
+                    B_trans, B_rd_nrow * B_rd_ncol, MPI_DOUBLE, B_2dmm, 
+                    AB_agv_recvcnts[0], MPI_DOUBLE, engine->comm_AB_agv
+                );
+            } else {
+                MPI_Allgatherv(
+                    B_trans, B_rd_nrow * B_rd_ncol, MPI_DOUBLE, B_2dmm, 
+                    AB_agv_recvcnts, AB_agv_displs, MPI_DOUBLE, engine->comm_AB_agv
+                );
+            }
         } else {
             B_2dmm = B_trans;
-        }
+        }  // End of "if (engine->task_m_num > 1)"
+
         if (engine->task_n_num > 1)
         {
-            MPI_Allgatherv(
-                A_trans, A_rd_nrow * A_rd_ncol, MPI_DOUBLE, A_2dmm, 
-                AB_agv_recvcnts, AB_agv_displs, MPI_DOUBLE, engine->comm_AB_agv
-            );
+            if (engine->use_ag)
+            {
+                MPI_Allgather(
+                    A_trans, A_rd_nrow * A_rd_ncol, MPI_DOUBLE, A_2dmm, 
+                    AB_agv_recvcnts[0], MPI_DOUBLE, engine->comm_AB_agv
+                );
+            } else {
+                MPI_Allgatherv(
+                    A_trans, A_rd_nrow * A_rd_ncol, MPI_DOUBLE, A_2dmm, 
+                    AB_agv_recvcnts, AB_agv_displs, MPI_DOUBLE, engine->comm_AB_agv
+                );
+            }
         } else {
             A_2dmm = A_trans;
-        }
+        }  // End of "if (engine->task_n_num > 1)"
         stop_t = MPI_Wtime();
-        engine->agvAB_ms += 1000.0 * (stop_t - start_t);
+        agvAB_ms = 1000.0 * (stop_t - start_t);
+        engine->agvAB_ms += agvAB_ms;
+        if (engine->print_timing) printf("[INFO] Allgather A or B time   = %.2f ms\n", agvAB_ms);
     } else {
         start_t = MPI_Wtime();
         mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_2dmm, B_2dmm_nrow);
         stop_t = MPI_Wtime();
-        engine->redist_ms += 1000.0 * (stop_t - start_t);
+        redist_ms = 1000.0 * (stop_t - start_t);
+        engine->redist_ms += redist_ms;
+        if (engine->print_timing) printf("[INFO] Redistribute A & B time = %.2f ms\n", redist_ms);
 
         // In each Cannon task group, block Bij hold by process Pij == the transpose of 
         // block Aji required by process Pji. Since Cannon 2D calls DGEMM with the 
@@ -770,7 +817,9 @@ void ca3dmm_engine_exec(
             transpose_cm_mat(A_2dmm_nrow, A_2dmm_ncol, A_trans, A_2dmm_ncol, A_2dmm, A_2dmm_nrow);
         }  // End of "if (engine->is_active == 1)"
         stop_t = MPI_Wtime();
-        engine->agvAB_ms += 1000.0 * (stop_t - start_t);
+        agvAB_ms = 1000.0 * (stop_t - start_t);
+        engine->agvAB_ms += agvAB_ms;
+        if (engine->print_timing) printf("[INFO] Allgather A or B time   = %.2f ms\n", agvAB_ms);
     }  // End of "if (engine->is_BTB == 0)"
 
     if (engine->is_active == 1)
@@ -779,28 +828,49 @@ void ca3dmm_engine_exec(
         if (engine->task_k_num == 1) C_2dmm = C_out;
         cannon_engine_exec(1.0, A_2dmm, B_2dmm, 0.0, C_2dmm, engine->cannon_engine);
         stop_t = MPI_Wtime();
-        engine->cannon_ms += 1000.0 * (stop_t - start_t);
+        cannon_ms = 1000.0 * (stop_t - start_t);
+        engine->cannon_ms += cannon_ms;
+        if (engine->print_timing) printf("[INFO] 2D Cannon time          = %.2f ms\n", cannon_ms);
 
         start_t = MPI_Wtime();
         if (engine->task_k_num > 1)
         {
-            MPI_Reduce_scatter(
-                C_2dmm, C_out, engine->C_rs_recvcnts, MPI_DOUBLE, 
-                MPI_SUM, engine->comm_C_rs
-            );
+            if (engine->use_rsb)
+            {
+                MPI_Reduce_scatter_block(
+                    C_2dmm, C_out, engine->C_rs_recvcnts[0], MPI_DOUBLE, 
+                    MPI_SUM, engine->comm_C_rs
+                );
+            } else {
+                MPI_Reduce_scatter(
+                    C_2dmm, C_out, engine->C_rs_recvcnts, MPI_DOUBLE, 
+                    MPI_SUM, engine->comm_C_rs
+                );
+            }
         }
         stop_t = MPI_Wtime();
-        engine->reduce_ms += 1000.0 * (stop_t - start_t);
+        reduce_ms = 1000.0 * (stop_t - start_t);
+        engine->reduce_ms += reduce_ms;
+        if (engine->print_timing)
+        {
+            printf("[INFO] Reduce-scatter C time   = %.2f ms\n", reduce_ms);
+            printf("[INFO] CA3DMM matmul time      = %.2f ms\n", agvAB_ms + cannon_ms + reduce_ms);
+        }
     }
 
     start_t = MPI_Wtime();
     if (engine->redist_C != NULL)
         mat_redist_engine_exec(engine->redist_C, engine->C_out, engine->C_out_nrow, dst_C, ldC);
     stop_t = MPI_Wtime();
-    engine->redist_ms += 1000.0 * (stop_t - start_t);
+    redist_ms = 1000.0 * (stop_t - start_t);
+    engine->redist_ms += redist_ms;
+    if (engine->print_timing) printf("[INFO] Redistribute C time     = %.2f ms\n", redist_ms);
 
+    // No need to add a global barrier here since mat_redist_engine_exec() already has one
     exec_stop_t = MPI_Wtime();
-    engine->exec_ms += 1000.0 * (exec_stop_t - exec_start_t);
+    exec_ms = 1000.0 * (exec_stop_t - exec_start_t);
+    engine->exec_ms += exec_ms;
+    if (engine->print_timing) printf("[INFO] CA3DMM exec time        = %.2f ms\n\n", exec_ms);
     engine->n_exec++;
 }
 
