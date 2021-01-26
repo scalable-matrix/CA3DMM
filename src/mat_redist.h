@@ -1,6 +1,8 @@
 #ifndef __MAT_REDIST_H__
 #define __MAT_REDIST_H__
 
+#include "enum.h"
+
 struct mat_redist_engine
 {
     MPI_Comm comm;          // MPI communicator
@@ -28,6 +30,8 @@ struct mat_redist_engine
     int     *rblk_sizes;    // Size n_proc_recv*4, each row describes a receive block's srow, scol, nrow, ncol
     void    *send_buf;      // Send buffer
     void    *recv_buf;      // Receive buffer
+
+    device_type communication_device; //What device is used
 };
 typedef struct mat_redist_engine  mat_redist_engine_s;
 typedef struct mat_redist_engine* mat_redist_engine_p;
@@ -48,6 +52,13 @@ extern "C" {
 //   dt_size         : Matrix element MPI data type size in bytes
 // Output parameter:
 //   *engine_ : Initialized mat_redist_engine_p
+void mat_redist_engine_init_ex(
+    const int src_srow, const int src_scol, const int src_nrow, const int src_ncol, 
+    const int req_srow, const int req_scol, const int req_nrow, const int req_ncol,
+    device_type communcation_device,
+    MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, mat_redist_engine_p *engine_
+);
+
 void mat_redist_engine_init(
     const int src_srow, const int src_scol, const int src_nrow, const int src_ncol, 
     const int req_srow, const int req_scol, const int req_nrow, const int req_ncol,

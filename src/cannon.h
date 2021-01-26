@@ -2,6 +2,8 @@
 #define __CANNON_H__
 
 #include <mpi.h>
+#include "enum.h"
+#include "linalg_lib_wrapper.h"
 
 struct cannon_engine
 {
@@ -33,6 +35,9 @@ struct cannon_engine
     MPI_Request req_recv_A[2];  // MPI requests for receiving A from right rank
     MPI_Request req_recv_B[2];  // MPI requests for receiving B from lower rank
 
+    device_type communication_device;
+    device_type compute_device;
+
     // Statistic data
     double init_ms;             // Time (milliseconds) used in initialization
     double shift0_ms;           // Time (milliseconds) used in initial shift
@@ -40,6 +45,8 @@ struct cannon_engine
     double gemm_ms;             // Time (milliseconds) used in local DGEMM
     double exec_ms;             // Time (milliseconds) used in the whole Cannon algorithm execution
     int    n_exec;              // Number of Cannon algorithm execution
+
+    linalg_handle_t handle;
 };
 typedef struct cannon_engine  cannon_engine_s;
 typedef struct cannon_engine* cannon_engine_p;
@@ -52,6 +59,7 @@ extern "C" {
 // Input parameters: see the cannon_engine structure above
 // Output parameters: 
 //   *engine_ : An initialized cannon_engine
+void cannon_engine_init_ex(const int m, const int n, const int k, device_type communication_device, device_type compute_device, MPI_Comm comm, cannon_engine_p *engine_);
 void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, cannon_engine_p *engine_);
 
 // Free a cannon_engine

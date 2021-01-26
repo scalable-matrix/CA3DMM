@@ -5,6 +5,7 @@
 #include <math.h>
 #include <mpi.h>
 
+#include "memory.h"
 #include "partition.h"
 #include "cannon.h"
 #include "ca3dmm.h"
@@ -19,9 +20,16 @@ static inline void swap_int(int *a, int *b)
 
 static inline void transpose_cm_mat(
     const int A_nrow, const int A_ncol, const double *A, const int ldA,
-    double *A_trans, const int ldAT
+    double *A_trans, const int ldAT, linalg_handle_t handle, device_type dev
 )
 {
+//printf("TRANSPOSE\n");
+#if USE_GPU
+if(dev == DEVICE_TYPE_DEVICE) {
+//printf("ON GPU\n");
+    gpu_transpose(A_nrow, A_ncol, A, ldA, A_trans, ldAT, handle, dev);
+} else {
+#endif
     // TODO: use multithreading if necessary
     for (int j = 0; j < A_ncol; j++)
     {
@@ -32,9 +40,11 @@ static inline void transpose_cm_mat(
             A_trans[idx1] = A[idx0];
         }
     }
+#if USE_GPU
+}
+#endif
 }
 
-// Initialize a camm3d_engine structure for C := op(A) * op(B)
 void ca3dmm_engine_init(
     const int m, const int n, const int k, const int trans_A, const int trans_B, 
     const int src_A_srow, const int src_A_nrow,
@@ -44,6 +54,30 @@ void ca3dmm_engine_init(
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
     const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+) {
+ ca3dmm_engine_init_ex(m,n,k,trans_A,trans_B,
+     src_A_srow,  src_A_nrow,
+     src_A_scol,  src_A_ncol,
+     src_B_srow,  src_B_nrow,
+     src_B_scol,  src_B_ncol,
+     dst_C_srow,  dst_C_nrow,
+     dst_C_scol,  dst_C_ncol,
+     DEVICE_TYPE_HOST, DEVICE_TYPE_HOST,
+     proc_grid, comm, engine_);
+}
+
+
+// Initialize a camm3d_engine structure for C := op(A) * op(B)
+void ca3dmm_engine_init_ex(
+    const int m, const int n, const int k, const int trans_A, const int trans_B, 
+    const int src_A_srow, const int src_A_nrow,
+    const int src_A_scol, const int src_A_ncol,
+    const int src_B_srow, const int src_B_nrow,
+    const int src_B_scol, const int src_B_ncol,
+    const int dst_C_srow, const int dst_C_nrow,
+    const int dst_C_scol, const int dst_C_ncol,
+    device_type communication_device, device_type compute_device,
+    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
 )
 {
     *engine_ = NULL;
@@ -51,6 +85,11 @@ void ca3dmm_engine_init(
     memset(engine, 0, sizeof(ca3dmm_engine_s));
 
     double start_t = MPI_Wtime();
+
+    engine->communication_device = communication_device;
+    engine->compute_device = compute_device;
+    init_linalg_handle(&(engine->handle), compute_device);
+    printf("Egine dev: %i, %i\n", engine->communication_device, engine->compute_device);
 
     // 1. Get the basic process grid
     engine->m = m;
@@ -173,7 +212,7 @@ void ca3dmm_engine_init(
         calc_block_size_pos(m, task_m_num, task_m_id, &task_m_size, &task_m_spos);
         calc_block_size_pos(n, task_n_num, task_n_id, &task_n_size, &task_n_spos);
         calc_block_size_pos(k, task_k_num, task_k_id, &task_k_size, &task_k_spos);
-        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine);
+        cannon_engine_init_ex(task_m_size, task_n_size, task_k_size, engine->communication_device, engine->compute_device, engine->comm_2dmm, &engine->cannon_engine);
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
         {
@@ -307,14 +346,16 @@ void ca3dmm_engine_init(
     }
     // Non-active processes still need to participate in initial A & B redistribution,
     // but their {A, B}_rd_{s, n}{row, col} == 0.
-    mat_redist_engine_init(
+    mat_redist_engine_init_ex(
         src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
         A_rd_scol,  A_rd_srow,  A_rd_ncol,  A_rd_nrow, 
+        engine->communication_device,
         comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
     );
-    mat_redist_engine_init(
+    mat_redist_engine_init_ex(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         B_rd_scol,  B_rd_srow,  B_rd_ncol,  B_rd_nrow, 
+        engine->communication_device,
         comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
     );
     if ((engine->redist_A == NULL) || (engine->redist_B == NULL))
@@ -326,9 +367,10 @@ void ca3dmm_engine_init(
     engine->AB_agv_displs   = AB_agv_displs;
     if (!((dst_C_srow == -1) || (dst_C_nrow == -1) || (dst_C_scol == -1) || (dst_C_ncol == -1)))
     {
-        mat_redist_engine_init(
+        mat_redist_engine_init_ex(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
+            engine->communication_device,
             comm, MPI_DOUBLE, sizeof(double), &engine->redist_C
         );
         if (engine->redist_C == NULL)
@@ -344,14 +386,22 @@ void ca3dmm_engine_init(
     void *C_2dmm = NULL, *C_out = NULL;
     if (engine->is_active)
     {
-        A_rd_recv = malloc(sizeof(double) * engine->A_rd_nrow   * engine->A_rd_ncol);
-        B_rd_recv = malloc(sizeof(double) * engine->B_rd_nrow   * engine->B_rd_ncol);
-        A_trans   = (trans_A == 1)   ? malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol) : A_rd_recv;
-        B_trans   = (trans_B == 1)   ? malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol) : B_rd_recv;
-        A_2dmm    = (task_n_num > 1) ? malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol) : A_trans;
-        B_2dmm    = (task_m_num > 1) ? malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol) : B_trans;
-        C_2dmm    = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
-        C_out     = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
+        A_rd_recv = _OUR_MALLOC(sizeof(double) * engine->A_rd_nrow   * engine->A_rd_ncol, engine->communication_device);
+        B_rd_recv = _OUR_MALLOC(sizeof(double) * engine->B_rd_nrow   * engine->B_rd_ncol, engine->communication_device);
+        A_trans   = (trans_A == 1)   ? _OUR_MALLOC(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol, engine->communication_device) : A_rd_recv;
+        B_trans   = (trans_B == 1)   ? _OUR_MALLOC(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol, engine->communication_device) : B_rd_recv;
+        A_2dmm    = (task_n_num > 1) ? _OUR_MALLOC(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol, engine->communication_device) : A_trans;
+        B_2dmm    = (task_m_num > 1) ? _OUR_MALLOC(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol, engine->communication_device) : B_trans;
+        C_2dmm    = _OUR_MALLOC(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol, engine->communication_device);
+        C_out     = _OUR_MALLOC(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol, engine->communication_device);
+
+        //printf("ALLOCED LOTS on def: %i\n", engine->communication_device);
+        //gpu_print_mat(A_rd_recv, 1, 1);
+        //gpu_print_mat(B_rd_recv, 1, 1);
+        //gpu_print_mat(A_trans, 1, 1);
+        //gpu_print_mat(B_trans, 1, 1);
+        //gpu_print_mat(A_2dmm, 1, 1);
+        //gpu_print_mat(B_2dmm, 1, 1);
         if ((A_rd_recv == NULL) || (A_trans == NULL) || (A_2dmm == NULL) ||
             (B_rd_recv == NULL) || (B_trans == NULL) || (B_2dmm == NULL) ||
             (C_2dmm == NULL) || (C_out  == NULL))
@@ -392,11 +442,31 @@ void ca3dmm_engine_init_BTB(
     const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
 )
 {
+    ca3dmm_engine_init_BTB_ex(n,k,src_B_srow,src_B_nrow,src_B_scol,src_B_ncol,
+    dst_C_srow,dst_C_nrow,dst_C_scol,dst_C_ncol,DEVICE_TYPE_HOST, DEVICE_TYPE_HOST,
+    proc_grid,comm,engine_);
+}
+
+void ca3dmm_engine_init_BTB_ex(
+    const int n, const int k, 
+    const int src_B_srow, const int src_B_nrow, 
+    const int src_B_scol, const int src_B_ncol,
+    const int dst_C_srow, const int dst_C_nrow,
+    const int dst_C_scol, const int dst_C_ncol,
+    device_type communication_device, device_type compute_device,
+    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+)
+{
     *engine_ = NULL;
     ca3dmm_engine_p engine = (ca3dmm_engine_p) malloc(sizeof(ca3dmm_engine_s));
     memset(engine, 0, sizeof(ca3dmm_engine_s));
 
     double start_t = MPI_Wtime();
+
+    engine->communication_device = communication_device;
+    engine->compute_device = compute_device;
+    init_linalg_handle(&(engine->handle), compute_device);
+    printf("Egine dev: %i, %i\n", engine->communication_device, engine->compute_device);
 
     // 1. Get the basic process grid
     int m = n;
@@ -496,7 +566,7 @@ void ca3dmm_engine_init_BTB(
         calc_block_size_pos(m, task_m_num, task_m_id, &task_m_size, &task_m_spos);
         calc_block_size_pos(n, task_n_num, task_n_id, &task_n_size, &task_n_spos);
         calc_block_size_pos(k, task_k_num, task_k_id, &task_k_size, &task_k_spos);
-        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine);
+        cannon_engine_init_ex(task_m_size, task_n_size, task_k_size, engine->communication_device, engine->compute_device, engine->comm_2dmm, &engine->cannon_engine);
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
         {
@@ -568,9 +638,10 @@ void ca3dmm_engine_init_BTB(
     //     but their B_{s, n}{row, col} == 0.
     // (3) The input A and B matrices are column-major, mat_redist_engine uses row-major, so 
     //     we need to swap the parameters when calling mat_redist_engine_init().
-    mat_redist_engine_init(
+    mat_redist_engine_init_ex(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         engine->B_2dmm_scol, engine->B_2dmm_srow, engine->B_2dmm_ncol, engine->B_2dmm_nrow, 
+        engine->communication_device,
         comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
     );
     if (engine->redist_B == NULL)
@@ -580,9 +651,10 @@ void ca3dmm_engine_init_BTB(
     }
     if (!((dst_C_srow == -1) || (dst_C_nrow == -1) || (dst_C_scol == -1) || (dst_C_ncol == -1)))
     {
-        mat_redist_engine_init(
+        mat_redist_engine_init_ex(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
+            engine->communication_device,
             comm, MPI_DOUBLE, sizeof(double), &engine->redist_C
         );
         if (engine->redist_C == NULL)
@@ -598,11 +670,11 @@ void ca3dmm_engine_init_BTB(
     void *C_2dmm = NULL, *C_out = NULL;
     if (engine->is_active)
     {
-        A_2dmm  = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
-        A_trans = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
-        B_2dmm  = malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol);
-        C_2dmm  = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
-        C_out   = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
+        A_2dmm  = _OUR_MALLOC(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol, engine->communication_device);
+        A_trans = _OUR_MALLOC(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol, engine->communication_device);
+        B_2dmm  = _OUR_MALLOC(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol, engine->communication_device);
+        C_2dmm  = _OUR_MALLOC(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol, engine->communication_device);
+        C_out   = _OUR_MALLOC(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol, engine->communication_device);
         if ((A_2dmm == NULL) || (A_trans == NULL) || (B_2dmm == NULL) || 
             (C_2dmm == NULL) || (C_out == NULL))
         {
@@ -640,14 +712,14 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
     free(engine->AB_agv_recvcnts);
     free(engine->AB_agv_displs);
     free(engine->C_rs_recvcnts);
-    free(engine->A_rd_recv);
-    free(engine->B_rd_recv);
-    if (engine->trans_A) free(engine->A_trans);
-    if (engine->trans_B) free(engine->B_trans);
-    if (engine->task_n_num > 1) free(engine->A_2dmm);
-    if (engine->task_m_num > 1) free(engine->B_2dmm);
-    free(engine->C_2dmm);
-    free(engine->C_out);
+    OUR_FREE(engine->A_rd_recv, engine->communication_device);
+    OUR_FREE(engine->B_rd_recv, engine->communication_device);
+    if (engine->trans_A) OUR_FREE(engine->A_trans, engine->communication_device);
+    if (engine->trans_B) OUR_FREE(engine->B_trans, engine->communication_device);
+    if (engine->task_n_num > 1) OUR_FREE(engine->A_2dmm, engine->communication_device);
+    if (engine->task_m_num > 1) OUR_FREE(engine->B_2dmm, engine->communication_device);
+    OUR_FREE(engine->C_2dmm, engine->communication_device);
+    OUR_FREE(engine->C_out, engine->communication_device);
     if (engine->is_BTB == 0) MPI_Comm_free(&engine->comm_AB_agv);
     MPI_Comm_free(&engine->comm_C_rs);
     MPI_Comm_free(&engine->comm_2dmm);
@@ -693,6 +765,9 @@ void ca3dmm_engine_exec(
     double *B_trans   = (double *) engine->B_trans;
     double *C_2dmm    = (double *) engine->C_2dmm;
     double *C_out     = (double *) engine->C_out;
+
+     //gpu_print_mat(A_2dmm, 1, 1);
+     //gpu_print_mat(A_trans, 1, 1);
 
     double start_t, stop_t, exec_start_t, exec_stop_t;
     double redist_ms, agvAB_ms, cannon_ms, reduce_ms, exec_ms;
@@ -740,9 +815,9 @@ void ca3dmm_engine_exec(
             B_trans_nrow = B_2dmm_nrow;
             B_trans_ncol = B_2dmm_ncol;
         }
-        if (trans_A) transpose_cm_mat(A_trans_nrow, A_trans_ncol, A_rd_recv, A_trans_ncol, A_trans, A_2dmm_nrow);
+        if (trans_A) transpose_cm_mat(A_trans_nrow, A_trans_ncol, A_rd_recv, A_trans_ncol, A_trans, A_2dmm_nrow, engine->handle, engine->communication_device);
         else A_trans = A_rd_recv;
-        if (trans_B) transpose_cm_mat(B_trans_nrow, B_trans_ncol, B_rd_recv, B_trans_ncol, B_trans, B_2dmm_nrow);
+        if (trans_B) transpose_cm_mat(B_trans_nrow, B_trans_ncol, B_rd_recv, B_trans_ncol, B_trans, B_2dmm_nrow, engine->handle, engine->communication_device);
         else B_trans = B_rd_recv;
 
         // Allgatherv A or B to make it complete
@@ -806,7 +881,7 @@ void ca3dmm_engine_exec(
             if (ce_rank_row == ce_rank_col)
             {
                 assert(B_2dmm_nrow * B_2dmm_ncol == A_2dmm_nrow * A_2dmm_ncol);
-                memcpy(A_trans, B_2dmm, sizeof(double) * B_2dmm_nrow * B_2dmm_ncol);
+                OUR_MEMCPY(A_trans, B_2dmm, sizeof(double) * B_2dmm_nrow * B_2dmm_ncol, engine->communication_device, engine->communication_device);
             } else {
                 int ce_pair_rank = ce_rank_col * ce->np_dim + ce_rank_row;
                 MPI_Sendrecv(
@@ -814,7 +889,11 @@ void ca3dmm_engine_exec(
                     A_trans, A_2dmm_nrow * A_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0, ce->comm, MPI_STATUS_IGNORE
                 );
             }
-            transpose_cm_mat(A_2dmm_nrow, A_2dmm_ncol, A_trans, A_2dmm_ncol, A_2dmm, A_2dmm_nrow);
+            //gpu_print_mat(A_2dmm, 1, 1);
+            //gpu_print_mat(B_2dmm, 1, 1);
+            transpose_cm_mat(A_2dmm_nrow, A_2dmm_ncol, A_trans, A_2dmm_ncol, A_2dmm, A_2dmm_nrow, engine->handle, engine->communication_device);
+            //gpu_print_mat(A_2dmm, 1, 1);
+            //gpu_print_mat(B_2dmm, 1, 1);
         }  // End of "if (engine->is_active == 1)"
         stop_t = MPI_Wtime();
         agvAB_ms = 1000.0 * (stop_t - start_t);
@@ -826,6 +905,8 @@ void ca3dmm_engine_exec(
     {
         start_t = MPI_Wtime();
         if (engine->task_k_num == 1) C_2dmm = C_out;
+        //gpu_print_mat(A_2dmm, 1, 1);
+        //gpu_print_mat(B_2dmm, 1, 1);
         cannon_engine_exec(1.0, A_2dmm, B_2dmm, 0.0, C_2dmm, engine->cannon_engine);
         stop_t = MPI_Wtime();
         cannon_ms = 1000.0 * (stop_t - start_t);

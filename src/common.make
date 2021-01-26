@@ -3,10 +3,11 @@ LIB_SO  = libca3dmm.so
 
 C_SRCS  = $(wildcard *.c)
 C_OBJS  = $(C_SRCS:.c=.c.o)
+LIB_OBJS = $(filter-out utils.c.o memory.c.o, $(C_OBJS))
 
 DEFS    = 
 INCS    = 
-CFLAGS  = $(INCS) -Wall -g -std=gnu11 -O3 -fPIC $(DEFS)
+CFLAGS  = $(INCS) -Wall -g -std=gnu11 -O3 -fPIC $(DEFS) -DDEBUG=0
 
 ifeq ($(shell $(CC) --version 2>&1 | grep -c "icc"), 1)
 AR      = xiar rcs
@@ -29,28 +30,54 @@ DEFS   += -DUSE_OPENBLAS
 INCS   += -I$(OPENBLAS_INSTALL_DIR)/include
 endif
 
+ifeq ($(strip $(USE_GPU)), 1)
+DEFS     += -DUSE_GPU=1
+LIB     += -lcublas
+INC     += -I$(OPENBLAS_INSTALL_DIR)/include
+
+#TODO: Handle gcc case
+LDFLAGS = -ccbin=mpicc -Xcompiler -std=gnu++98,-mkl,-O3,-xHost,-g,-fPIC -G -lcuda -lcudart -lcublas -arch=sm_70 -gencode=arch=compute_70,code=sm_70
+CUFLAGS = $(DEFS) -O3 -g -Xcompiler -std=gnu++98,-O3,-g,-fPIC -G -arch=sm_70 -gencode=arch=compute_70,code=sm_70
+
+LINALG_OBJ := linalg_gpu.cu.o linalg_cpu.c.o
+
+LINKER = $(NVCC)
+EXES = carma_test2 
+else
+LINALG_OBJ := linalg_cpu.c.o 
+
+LINKER = $(CC)
+EXES = carma_test carma_test2 carma_test2-ATA
+endif
+
+
+
 # Delete the default old-fashion double-suffix rules
 .SUFFIXES:
 
 .SECONDARY: $(C_OBJS)
 
-all: install
+all: install $(LIB_OBJS)
 
-install: $(LIB_A) $(LIB_SO)
+install: $(LIB_A) $(LIB_SO) gpu.cu.o
 	mkdir -p ../lib
 	mkdir -p ../include
 	cp -u $(LIB_A)  ../lib/$(LIB_A)
 	cp -u $(LIB_SO) ../lib/$(LIB_SO)
 	cp -u *.h ../include/
 
-$(LIB_A): $(C_OBJS) 
+$(LIB_A): $(LIB_OBJS)  $(LINALG_OBJ)
 	$(AR) $@ $^
 
-$(LIB_SO): $(C_OBJS) 
-	$(CC) -shared -o $@ $^
+$(LIB_SO): $(LIB_OBJS)  $(LINALG_OBJ)
+	$(NVCC) -ccbin=$(CC) -shared -o $@ $^
 
 %.c.o: %.c
 	$(CC) $(CFLAGS) -c $^ -o $@
+
+%.cu.o: %.cu
+	$(NVCC) $(CUFLAGS) -c $^ -o $@
+
 
 clean:
 	rm $(C_OBJS) $(LIB_A) $(LIB_SO)

@@ -5,14 +5,21 @@
 #include <math.h>
 #include <mpi.h>
 
+#include "memory.h"
 #include "partition.h"
 #include "cannon.h"
 #include "linalg_lib_wrapper.h"
 
-// Initialize a cannon_engine for 2D Cannon matrix multiplication algorithm
 void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, cannon_engine_p *engine_)
 {
+    cannon_engine_init_ex(m,n,k,comm,DEVICE_TYPE_HOST,DEVICE_TYPE_HOST,engine_);
+}
+
+// Initialize a cannon_engine for 2D Cannon matrix multiplication algorithm
+void cannon_engine_init_ex(const int m, const int n, const int k, device_type communication_device, device_type compute_device, MPI_Comm comm, cannon_engine_p *engine_)
+{
     *engine_ = NULL;
+
 
     int my_rank, n_proc, np_dim;
     MPI_Comm_rank(comm, &my_rank);
@@ -36,6 +43,7 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     int rank_row = coords[0];
     int rank_col = coords[1];
 
+
     cannon_engine_p engine = (cannon_engine_p) malloc(sizeof(cannon_engine_s));
     memset(engine, 0, sizeof(cannon_engine_s));
     engine->m         = m;
@@ -51,6 +59,10 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     engine->gemm_ms   = 0.0;
     engine->exec_ms   = 0.0;
     engine->n_exec    = 0;
+
+    init_linalg_handle(&(engine->handle), compute_device);
+    engine->communication_device  = communication_device;
+    engine->compute_device  = compute_device;
 
     int *m_displs = (int *) malloc(sizeof(int) * (np_dim + 1));
     int *n_displs = (int *) malloc(sizeof(int) * (np_dim + 1));
@@ -88,11 +100,11 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     const int max_A_blk_size = (m / np_dim + 1) * (k / np_dim + 1);
     const int max_B_blk_size = (k / np_dim + 1) * (n / np_dim + 1);
     const int max_C_blk_size = (m / np_dim + 1) * (n / np_dim + 1);
-    void *A_gemm = malloc(sizeof(double) * max_A_blk_size);
-    void *A_recv = malloc(sizeof(double) * max_A_blk_size);
-    void *B_gemm = malloc(sizeof(double) * max_B_blk_size);
-    void *B_recv = malloc(sizeof(double) * max_B_blk_size);
-    void *C_buff = malloc(sizeof(double) * max_C_blk_size);
+    void *A_gemm = _OUR_MALLOC(sizeof(double) * max_A_blk_size, communication_device);
+    void *A_recv = _OUR_MALLOC(sizeof(double) * max_A_blk_size, communication_device);
+    void *B_gemm = _OUR_MALLOC(sizeof(double) * max_B_blk_size, communication_device);
+    void *B_recv = _OUR_MALLOC(sizeof(double) * max_B_blk_size, communication_device);
+    void *C_buff = _OUR_MALLOC(sizeof(double) * max_C_blk_size, communication_device);
     if ((A_gemm == NULL) || (A_recv == NULL) || (B_gemm == NULL) || (B_recv == NULL) || (C_buff == NULL))
     {
         fprintf(stderr, "[ERROR] Failed to allocate cannon_engine matrix buffers\n");
@@ -133,8 +145,8 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     {
         gemm_cycle = (min_k_blk_size + curr_k_blk_size - 1) / curr_k_blk_size;
         if (gemm_cycle > np_dim) gemm_cycle = np_dim;
-        A_stack = malloc(sizeof(double) * max_A_blk_size * gemm_cycle);
-        B_stack = malloc(sizeof(double) * max_B_blk_size * gemm_cycle);
+        A_stack = _OUR_MALLOC(sizeof(double) * max_A_blk_size * gemm_cycle, communication_device);
+        B_stack = _OUR_MALLOC(sizeof(double) * max_B_blk_size * gemm_cycle, communication_device);
     }
     engine->gemm_cycle = gemm_cycle;
     engine->A_stack = A_stack;
@@ -172,13 +184,13 @@ void cannon_engine_free(cannon_engine_p *engine_)
     free(engine->m_displs);
     free(engine->n_displs);
     free(engine->k_displs);
-    free(engine->A_gemm);
-    free(engine->A_recv);
-    free(engine->A_stack);
-    free(engine->B_gemm);
-    free(engine->B_recv);
-    free(engine->B_stack);
-    free(engine->C_buff);
+    OUR_FREE(engine->A_gemm, engine->communication_device);
+    OUR_FREE(engine->A_recv, engine->communication_device);
+    OUR_FREE(engine->A_stack, engine->communication_device);
+    OUR_FREE(engine->B_gemm, engine->communication_device);
+    OUR_FREE(engine->B_recv, engine->communication_device);
+    OUR_FREE(engine->B_stack, engine->communication_device);
+    OUR_FREE(engine->C_buff, engine->communication_device);
     MPI_Comm_free(&engine->comm);
     for (int i = 0; i < 1; i++)
     {
@@ -276,9 +288,10 @@ void cannon_engine_exec_cc1(
         start_t = MPI_Wtime();
         double beta  = (i_step == 0) ? 0.0 : 1.0;
         double alpha = 1.0;
-        cblas_dgemm(
-            CblasColMajor, CblasNoTrans, CblasNoTrans, A_m, B_n, local_k, 
-            alpha, A_gemm, A_m, B_gemm, local_k, beta, C_buff, A_m
+        local_AB(engine->handle,
+            A_m, B_n, local_k, 
+            alpha, A_gemm, A_m, B_gemm, local_k, beta, C_buff, A_m,
+            engine->communication_device, engine->compute_device
         );
         src_offset = (src_offset + 1) % np_dim;
         local_k = k_displs[src_offset + 1] - k_displs[src_offset];
@@ -407,9 +420,10 @@ void cannon_engine_exec_cck(
         {
             double beta  = (gemm_step == 0) ? 0.0 : 1.0;
             double alpha = 1.0;
-            cblas_dgemm(
-                CblasColMajor, CblasNoTrans, CblasNoTrans, A_m, B_n, k_stack_size, 
-                alpha, A_stack, ldAs, B_stack, ldBs, beta, C_buff, A_m
+            local_AB(engine->handle,
+                A_m, B_n, k_stack_size, 
+                alpha, A_stack, ldAs, B_stack, ldBs, beta, C_buff, A_m,
+            engine->communication_device, engine->compute_device
             );
             gemm_step++;
             k_stack_size = 0;
@@ -424,9 +438,10 @@ void cannon_engine_exec_cck(
     {
         double beta  = (gemm_step == 0) ? 0.0 : 1.0;
         double alpha = 1.0;
-        cblas_dgemm(
-            CblasColMajor, CblasNoTrans, CblasNoTrans, A_m, B_n, k_stack_size, 
-            alpha, A_stack, ldAs, B_stack, ldBs, beta, C_buff, A_m
+        local_AB(engine->handle,
+            A_m, B_n, k_stack_size, 
+            alpha, A_stack, ldAs, B_stack, ldBs, beta, C_buff, A_m,
+            engine->communication_device, engine->compute_device
         );
         gemm_step++;
         k_stack_size = 0;
@@ -462,9 +477,10 @@ void cannon_engine_exec(
     if (engine->np_dim == 1)
     {
         double start_t = MPI_Wtime();
-        cblas_dgemm(
-            CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, k, 
-            alpha, A_blk, m, B_blk, k, beta, C_blk, m
+        local_AB(engine->handle,
+            m, n, k, 
+            alpha, A_blk, m, B_blk, k, beta, C_blk, m,
+            engine->communication_device, engine->compute_device
         );
         double stop_t  = MPI_Wtime();
         engine->gemm_ms += 1000.0 * (stop_t - start_t);

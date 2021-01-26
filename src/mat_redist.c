@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <mpi.h>
 
+#include "memory.h"
 #include "mat_redist.h"
 
 static void calc_seg_intersection(
@@ -41,7 +42,8 @@ static void calc_rect_intersection(
 
 static void copy_matrix_block(
     const size_t dt_size, const int nrow, const int ncol, 
-    const void *src, const int lds, void *dst, const int ldd
+    const void *src, const int lds, void *dst, const int ldd,
+    device_type device
 )
 {
     const char *src_ = (char*) src;
@@ -53,14 +55,25 @@ static void copy_matrix_block(
     {
         size_t src_offset = (size_t) irow * lds_;
         size_t dst_offset = (size_t) irow * ldd_;
-        memcpy(dst_ + dst_offset, src_ + src_offset, row_msize);
+        OUR_MEMCPY(dst_ + dst_offset, src_ + src_offset, row_msize, device, device);
     }
 }
 
-// Set up a mat_redist_engine_s for redistributing a 2D partitioned matrix
 void mat_redist_engine_init(
     const int src_srow, const int src_scol, const int src_nrow, const int src_ncol, 
     const int req_srow, const int req_scol, const int req_nrow, const int req_ncol,
+    MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, mat_redist_engine_p *engine_
+)
+{
+    mat_redist_engine_init_ex(src_srow, src_scol, src_nrow, src_ncol, req_srow,
+    req_scol, req_nrow, req_ncol, DEVICE_TYPE_HOST, comm, dtype, dt_size, engine_);
+}
+
+// Set up a mat_redist_engine_s for redistributing a 2D partitioned matrix
+void mat_redist_engine_init_ex(
+    const int src_srow, const int src_scol, const int src_nrow, const int src_ncol, 
+    const int req_srow, const int req_scol, const int req_nrow, const int req_ncol,
+    device_type communication_device,
     MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, mat_redist_engine_p *engine_
 )
 {
@@ -83,6 +96,7 @@ void mat_redist_engine_init(
     engine->req_nrow = req_nrow;
     engine->req_scol = req_scol;
     engine->req_ncol = req_ncol;
+    engine->communication_device = communication_device;
 
     // Gather all processes' source and required block info
     int src_erow = src_srow + src_nrow - 1;
@@ -129,8 +143,10 @@ void mat_redist_engine_init(
     int  *send_sizes  = (int*)  malloc(sizeof(int) * n_proc_send);
     int  *send_displs = (int*)  malloc(sizeof(int) * (n_proc_send + 1));
     int  *sblk_sizes  = (int*)  malloc(sizeof(int) * n_proc_send * 4);
-    void *send_buf    = (void*) malloc(dt_size     * send_cnt);
-    if (send_ranks == NULL || send_sizes == NULL || send_displs == NULL || sblk_sizes == NULL || send_buf == NULL)
+    void *send_buf    = (void*) _OUR_MALLOC(dt_size     * send_cnt, communication_device);
+    // printf("n_proc_send: %i, send_ranks: %p, sblk_sizes: %p, send_sizes: %p, send_displs: %p, send_buf: %p, send_cnt: %i\n",
+    // n_proc_send, send_ranks, sblk_sizes, send_sizes, send_displs, send_buf, send_cnt);
+    if ((((n_proc_send != 0) && (send_ranks == NULL || sblk_sizes == NULL || send_sizes == NULL))  || send_displs == NULL || ((send_buf == NULL) && (send_cnt != 0))))
     {
         fprintf(stderr, "[ERROR] Failed to allocate send_info (size %d) or send_buf (size %d)\n", 7 * n_proc_send, send_cnt);
         free(engine);
@@ -190,9 +206,8 @@ void mat_redist_engine_init(
     int  *recv_sizes  = (int*)  malloc(sizeof(int) * n_proc_recv);
     int  *recv_displs = (int*)  malloc(sizeof(int) * (n_proc_recv + 1));
     int  *rblk_sizes  = (int*)  malloc(sizeof(int) * n_proc_recv * 4);
-    void *recv_buf    = (void*) malloc(dt_size     * recv_cnt);
-    if (recv_ranks == NULL || recv_sizes == NULL || recv_displs == NULL || rblk_sizes == NULL || recv_buf == NULL)
-    {
+    void *recv_buf    = (void*) _OUR_MALLOC(dt_size     * recv_cnt, communication_device);
+    if (((((n_proc_recv != 0) && (recv_ranks == NULL || recv_sizes == NULL ||  rblk_sizes == NULL)) || recv_displs == NULL || ((recv_buf == NULL) && (recv_cnt != 0))))) {
         fprintf(stderr, "[ERROR] Failed to allocate recv_info (size %d) or recv_buf (size %d)\n", 7 * n_proc_recv, recv_cnt);
         free(engine);
         *engine_ = NULL;
@@ -248,8 +263,8 @@ void mat_redist_engine_free(mat_redist_engine_p *engine_)
     free(engine->recv_sizes);
     free(engine->recv_displs);
     free(engine->rblk_sizes);
-    free(engine->send_buf);
-    free(engine->recv_buf);
+    OUR_FREE(engine->send_buf, engine->communication_device);
+    OUR_FREE(engine->recv_buf, engine->communication_device);
     free(engine);
     *engine_ = NULL;
 }
@@ -277,6 +292,7 @@ void mat_redist_engine_exec(
     int  *sblk_sizes  = engine->sblk_sizes;
     char *send_buf    = (char*) engine->send_buf;
     char *src_blk_    = (char*) src_blk;
+    const device_type dev = engine->communication_device;
     for (int isend = 0; isend < n_proc_send; isend++)
     {
         int *i_sblk_size = sblk_sizes + isend * 4;
@@ -288,7 +304,7 @@ void mat_redist_engine_exec(
         int local_scol  = i_send_scol - src_scol;
         char *i_send_buf  = send_buf + dt_size * send_displs[isend];
         const char *i_send_src = src_blk_ + dt_size * (local_srow * src_ld + local_scol);
-        copy_matrix_block(dt_size, i_send_nrow, i_send_ncol, i_send_src, src_ld, i_send_buf, i_send_ncol);
+        copy_matrix_block(dt_size, i_send_nrow, i_send_ncol, i_send_src, src_ld, i_send_buf, i_send_ncol, dev);
     }  // End of isend loop
 
     // Redistribute data using MPI_Neighbor_alltoallv
@@ -317,7 +333,7 @@ void mat_redist_engine_exec(
         int local_scol  = i_recv_scol - req_scol;
         char *i_recv_buf = recv_buf + dt_size * recv_displs[irecv];
         char *i_recv_dst = dst_blk_ + dt_size * (local_srow * dst_ld + local_scol);
-        copy_matrix_block(dt_size, i_recv_nrow, i_recv_ncol, i_recv_buf, i_recv_ncol, i_recv_dst, dst_ld);
+        copy_matrix_block(dt_size, i_recv_nrow, i_recv_ncol, i_recv_buf, i_recv_ncol, i_recv_dst, dst_ld, dev);
     }  // End of recv_cnt loop
 
     MPI_Barrier(engine->comm);

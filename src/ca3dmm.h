@@ -52,6 +52,9 @@ struct ca3dmm_engine
     mat_redist_engine_p redist_C;   // Redistribution of C matrix from CA3DMM output layout to required layout
     cannon_engine_p cannon_engine;  // cannon_engine for 2D matmul
 
+    device_type communication_device;
+    device_type compute_device;
+
     // Statistic data
     int    print_timing;            // If rank 0 should print timing in each ca3dmm_engine_exec
     double init_ms;                 // Time (milliseconds) used in initialization
@@ -61,6 +64,8 @@ struct ca3dmm_engine
     double reduce_ms;               // Time (milliseconds) used in k dimension reduction
     double exec_ms;                 // Time (milliseconds) used in the whole CA3DMM algorithm execution
     int    n_exec;                  // Number of CA3DMM algorithm execution
+
+    linalg_handle_t handle;
 };
 typedef struct ca3dmm_engine  ca3dmm_engine_s;
 typedef struct ca3dmm_engine* ca3dmm_engine_p;
@@ -89,6 +94,18 @@ extern "C" {
 // Note: 
 //   (1) CA3DMM does not check the correctness of src_{A, B}_{s, n}{row, col} and dst_C_{s, n}{row, col}
 //   (2) If dst_C_{s, n}{row, col} are all -1, CA3DMM will not redistribute output C matrix
+void ca3dmm_engine_init_ex(
+    const int m, const int n, const int k, const int trans_A, const int trans_B, 
+    const int src_A_srow, const int src_A_nrow, 
+    const int src_A_scol, const int src_A_ncol,
+    const int src_B_srow, const int src_B_nrow,
+    const int src_B_scol, const int src_B_ncol,
+    const int dst_C_srow, const int dst_C_nrow,
+    const int dst_C_scol, const int dst_C_ncol,
+    device_type communication_device, device_type compute_device,
+    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+);
+
 void ca3dmm_engine_init(
     const int m, const int n, const int k, const int trans_A, const int trans_B, 
     const int src_A_srow, const int src_A_nrow, 
@@ -119,6 +136,16 @@ void ca3dmm_engine_init(
 // Note: 
 //   (1) CA3DMM does not check the correctness of src_B_{s, n}{row, col} and dst_C_{s, n}{row, col}
 //   (2) If dst_C_{s, n}{row, col} are all -1, CA3DMM will not redistribute output C matrix
+void ca3dmm_engine_init_BTB_ex(
+    const int n, const int k, 
+    const int src_B_srow, const int src_B_nrow,
+    const int src_B_scol, const int src_B_ncol,
+    const int dst_C_srow, const int dst_C_nrow,
+    const int dst_C_scol, const int dst_C_ncol,
+    device_type communication_device, device_type compute_device,
+    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+);
+
 void ca3dmm_engine_init_BTB(
     const int n, const int k, 
     const int src_B_srow, const int src_B_nrow,

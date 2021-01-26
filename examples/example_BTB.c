@@ -6,6 +6,8 @@
 
 #include <mpi.h>
 
+#include "memory.h"
+#include "enum.h"
 #include "ca3dmm.h"
 #include "example_utils.h"
 
@@ -32,6 +34,11 @@ int main(int argc, char **argv)
     int trans_B = get_int_param(argc, argv, 5, 0, 0, 1);
     int chk_res = get_int_param(argc, argv, 6, 1, 0, 1);
     int n_test  = get_int_param(argc, argv, 7, 10, 1, 100);
+    int use_gpu  = get_int_param(argc, argv, 8, 0, 0, 1);
+
+    device_type dev = (use_gpu)?DEVICE_TYPE_DEVICE:DEVICE_TYPE_HOST;
+    device_type compute_device = dev;
+    device_type communication_device = dev;
 
     if (m != n)
     {
@@ -66,6 +73,9 @@ int main(int argc, char **argv)
     size_t C_out_msize = sizeof(double) * (size_t) C_out_nrow * (size_t) C_out_ncol;
     double *B_in  = (double *) malloc(B_in_msize);
     double *C_out = (double *) malloc(C_out_msize);
+
+    double *B_in_d  = _OUR_MALLOC(B_in_msize, compute_device);
+    double *C_out_d  = _OUR_MALLOC(C_out_msize, compute_device);
     for (int j = 0; j < B_in_ncol; j++)
     {
         int global_j = j + B_in_scol;
@@ -80,11 +90,13 @@ int main(int argc, char **argv)
 
     // Initialize ca3dmm_engine
     ca3dmm_engine_p ce;
-    ca3dmm_engine_init_BTB(
+    ca3dmm_engine_init_BTB_ex(
         n, k, B_in_srow, B_in_nrow, B_in_scol, B_in_ncol,
         C_out_srow, C_out_nrow, C_out_scol, C_out_ncol,
+        communication_device, compute_device,
         NULL, MPI_COMM_WORLD, &ce
     );
+    OUR_MEMCPY(B_in_d, B_in, B_in_msize, compute_device, DEVICE_TYPE_HOST);
     if (ce->my_rank == 0)
     {
         int mb = (m + ce->mp - 1) / ce->mp;
@@ -104,12 +116,13 @@ int main(int argc, char **argv)
     }
 
     // Warm up running
-    ca3dmm_engine_exec(NULL, 0, B_in, B_in_nrow, C_out, C_out_nrow, ce);
+    ca3dmm_engine_exec(NULL, 0, B_in_d, B_in_nrow, C_out_d, C_out_nrow, ce);
     ca3dmm_engine_reset_stat(ce);
 
     // Timing running
     for (int itest = 0; itest < n_test; itest++)
-        ca3dmm_engine_exec(NULL, 0, B_in, B_in_nrow, C_out, C_out_nrow, ce);
+        ca3dmm_engine_exec(NULL, 0, B_in_d, B_in_nrow, C_out_d, C_out_nrow, ce);
+    OUR_MEMCPY(C_out, C_out_d, C_out_msize, DEVICE_TYPE_HOST, compute_device);
     if (my_rank == 0) ca3dmm_engine_print_stat(ce);
 
     // Check the correctness of the result
@@ -169,6 +182,8 @@ int main(int argc, char **argv)
         free(B_chk);
         free(C_chk);
     }
+    OUR_FREE(B_in_d, compute_device);
+    OUR_FREE(C_out_d, compute_device);
 
     free(B_in);
     free(C_out);
