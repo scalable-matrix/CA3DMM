@@ -89,7 +89,7 @@ void ca3dmm_engine_init_ex(
     engine->communication_device = communication_device;
     engine->compute_device = compute_device;
     init_linalg_handle(&(engine->handle), compute_device);
-    printf("Egine dev: %i, %i\n", engine->communication_device, engine->compute_device);
+    //printf("Egine dev: %i, %i\n", engine->communication_device, engine->compute_device);
 
     // 1. Get the basic process grid
     engine->m = m;
@@ -466,7 +466,7 @@ void ca3dmm_engine_init_BTB_ex(
     engine->communication_device = communication_device;
     engine->compute_device = compute_device;
     init_linalg_handle(&(engine->handle), compute_device);
-    printf("Egine dev: %i, %i\n", engine->communication_device, engine->compute_device);
+    //printf("Egine dev: %i, %i\n", engine->communication_device, engine->compute_device);
 
     // 1. Get the basic process grid
     int m = n;

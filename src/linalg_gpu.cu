@@ -67,7 +67,7 @@ void local_AB_gpu(linalg_handle_t handle, int m,  int n, int k, double alpha,  c
 }
 
 void init_linalg_handle_gpu(linalg_handle_t* handle) {
-  printf("CREATE HANDL\n");
+  //printf("CREATE HANDL\n");
   cublasErrchk(cublasCreate(handle));
 }
 
@@ -76,7 +76,7 @@ void gpu_transpose(
     const int A_nrow, const int A_ncol, const double *A, const int ldA,
     double *A_trans, const int ldAT, linalg_handle_t handle, device_type dev) {
     //printf("A_nrow: %i, A_ncol: %i, A: %p, ldA: %i, A_trans: %p, ldAT: %i\n",
-    A_nrow, A_ncol, A, ldA, A_trans, ldAT);
+    //A_nrow, A_ncol, A, ldA, A_trans, ldAT);
 
     double alpha = 1;
     double beta = 0;

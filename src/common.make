@@ -59,7 +59,7 @@ endif
 
 all: install $(LIB_OBJS)
 
-install: $(LIB_A) $(LIB_SO) gpu.cu.o
+install: $(LIB_A) $(LIB_SO) gpu.cu.o memory.c.o utils.c.o
 	mkdir -p ../lib
 	mkdir -p ../include
 	cp -u $(LIB_A)  ../lib/$(LIB_A)
