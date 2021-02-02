@@ -41,7 +41,7 @@ CUFLAGS = $(DEFS) -O3 -g -Xcompiler -std=gnu++98,-O3,-g,-fPIC -G -arch=sm_70 -ge
 
 LINALG_OBJ := linalg_gpu.cu.o linalg_cpu.c.o
 
-LINKER = $(NVCC)
+LINKER = $(NVCC) -ccbin=$(CC)
 EXES = carma_test2 
 else
 LINALG_OBJ := linalg_cpu.c.o 
@@ -59,7 +59,8 @@ endif
 
 all: install $(LIB_OBJS)
 
-install: $(LIB_A) $(LIB_SO) gpu.cu.o memory.c.o utils.c.o
+#gpu.cu.o memory.c.o utils.c.o
+install: $(LIB_A) $(LIB_SO) 
 	mkdir -p ../lib
 	mkdir -p ../include
 	cp -u $(LIB_A)  ../lib/$(LIB_A)
@@ -70,7 +71,7 @@ $(LIB_A): $(LIB_OBJS)  $(LINALG_OBJ)
 	$(AR) $@ $^
 
 $(LIB_SO): $(LIB_OBJS)  $(LINALG_OBJ)
-	$(LINKER) -ccbin=$(CC) -shared -o $@ $^
+	$(LINKER) -shared -o $@ $^
 
 %.c.o: %.c
 	$(CC) $(CFLAGS) -c $^ -o $@
