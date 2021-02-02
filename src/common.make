@@ -70,7 +70,7 @@ $(LIB_A): $(LIB_OBJS)  $(LINALG_OBJ)
 	$(AR) $@ $^
 
 $(LIB_SO): $(LIB_OBJS)  $(LINALG_OBJ)
-	$(NVCC) -ccbin=$(CC) -shared -o $@ $^
+	$(LINKER) -ccbin=$(CC) -shared -o $@ $^
 
 %.c.o: %.c
 	$(CC) $(CFLAGS) -c $^ -o $@
