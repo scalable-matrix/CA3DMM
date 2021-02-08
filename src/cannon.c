@@ -12,7 +12,7 @@
 
 void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, cannon_engine_p *engine_)
 {
-    cannon_engine_init_ex(m,n,k,comm,DEVICE_TYPE_HOST,DEVICE_TYPE_HOST,engine_);
+    cannon_engine_init_ex(m,n,k,DEVICE_TYPE_HOST,DEVICE_TYPE_HOST,comm,engine_);
 }
 
 // Initialize a cannon_engine for 2D Cannon matrix multiplication algorithm
