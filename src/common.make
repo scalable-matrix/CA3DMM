@@ -81,4 +81,4 @@ $(LIB_SO): $(LIB_OBJS)  $(LINALG_OBJ)
 
 
 clean:
-	rm $(C_OBJS) $(LIB_A) $(LIB_SO)
+	rm -f $(C_OBJS) $(LIB_A) $(LIB_SO)
