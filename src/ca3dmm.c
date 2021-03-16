@@ -714,10 +714,10 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
     free(engine->C_rs_recvcnts);
     OUR_FREE(engine->A_rd_recv, engine->communication_device);
     OUR_FREE(engine->B_rd_recv, engine->communication_device);
-    if (engine->trans_A) OUR_FREE(engine->A_trans, engine->communication_device);
-    if (engine->trans_B) OUR_FREE(engine->B_trans, engine->communication_device);
-    if (engine->task_n_num > 1) OUR_FREE(engine->A_2dmm, engine->communication_device);
-    if (engine->task_m_num > 1) OUR_FREE(engine->B_2dmm, engine->communication_device);
+    if (engine->A_trans != engine->A_rd_recv) OUR_FREE(engine->A_trans, engine->communication_device);
+    if (engine->B_trans != engine->B_rd_recv) OUR_FREE(engine->B_trans, engine->communication_device);
+    if (engine->A_2dmm != engine->A_trans) OUR_FREE(engine->A_2dmm, engine->communication_device);
+    if (engine->B_2dmm != engine->B_trans) OUR_FREE(engine->B_2dmm, engine->communication_device);
     OUR_FREE(engine->C_2dmm, engine->communication_device);
     OUR_FREE(engine->C_out, engine->communication_device);
     if (engine->is_BTB == 0) MPI_Comm_free(&engine->comm_AB_agv);
