@@ -421,7 +421,7 @@ void ca3dmm_engine_init_ex(
     engine->C_out     = C_out;
 
     char *print_timing_p = getenv("CA3DMM_PRINT_TIMING");
-    int print_timing;
+    int print_timing = 0 ;
     if (print_timing_p != NULL) print_timing = atoi(print_timing_p);
     if (engine->my_rank == 0 && print_timing == 1) engine->print_timing = 1;
     else engine->print_timing = 0;
@@ -693,7 +693,7 @@ void ca3dmm_engine_init_BTB_ex(
     engine->C_out     = C_out;
 
     char *print_timing_p = getenv("CA3DMM_PRINT_TIMING");
-    int print_timing;
+    int print_timing = 0;
     if (print_timing_p != NULL) print_timing = atoi(print_timing_p);
     if (engine->my_rank == 0 && print_timing == 1) engine->print_timing = 1;
     else engine->print_timing = 0;
