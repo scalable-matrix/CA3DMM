@@ -33,7 +33,7 @@ endif
 ifeq ($(strip $(USE_GPU)), 1)
 DEFS     += -DUSE_GPU=1
 LIB     += -lcublas
-INC     += -I$(OPENBLAS_INSTALL_DIR)/include
+INCS     += -I$(CUDA_ROOT)/include
 
 #TODO: Handle gcc case
 LDFLAGS = -ccbin=mpicc -Xcompiler -std=gnu++98,-mkl,-O3,-xHost,-g,-fPIC -G -lcuda -lcudart -lcublas -arch=sm_70 -gencode=arch=compute_70,code=sm_70
