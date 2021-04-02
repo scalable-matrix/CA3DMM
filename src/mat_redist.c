@@ -306,6 +306,12 @@ void mat_redist_engine_exec(
         const char *i_send_src = src_blk_ + dt_size * (local_srow * src_ld + local_scol);
         copy_matrix_block(dt_size, i_send_nrow, i_send_ncol, i_send_src, src_ld, i_send_buf, i_send_ncol, dev);
     }  // End of isend loop
+#if USE_GPU
+    if(dev == DEVICE_TYPE_DEVICE) {
+        gpuErrchk( cudaPeekAtLastError() );
+        gpuErrchk( cudaDeviceSynchronize() );
+    }
+#endif
 
     // Redistribute data using MPI_Neighbor_alltoallv
     int  *recv_sizes  = engine->recv_sizes;
@@ -315,6 +321,12 @@ void mat_redist_engine_exec(
         send_buf, send_sizes, send_displs, engine->dtype, 
         recv_buf, recv_sizes, recv_displs, engine->dtype, engine->comm
     );
+#if USE_GPU
+    if(dev == DEVICE_TYPE_DEVICE) {
+        gpuErrchk( cudaPeekAtLastError() );
+        gpuErrchk( cudaDeviceSynchronize() );
+    }
+#endif
 
     // Repack received blocks
     int  req_srow    = engine->req_srow;

@@ -251,6 +251,13 @@ void cannon_engine_exec_cc1(
         B_recv, B_recv_k * B_n, MPI_DOUBLE, B_src_rank, 1, comm, MPI_STATUS_IGNORE
     );
     MPI_Barrier(comm);
+
+#if USE_GPU
+    if(engine->communication_device == DEVICE_TYPE_DEVICE) {
+        gpuErrchk( cudaPeekAtLastError() );
+        gpuErrchk( cudaDeviceSynchronize() );
+    }
+#endif
     stop_t  = MPI_Wtime();
     engine->shift0_ms += 1000.0 * (stop_t - start_t);
 
@@ -267,6 +274,12 @@ void cannon_engine_exec_cc1(
             MPI_Wait(req_send_B_p, MPI_STATUS_IGNORE);
             MPI_Wait(req_recv_A_p, MPI_STATUS_IGNORE);
             MPI_Wait(req_recv_B_p, MPI_STATUS_IGNORE);
+#if USE_GPU
+            if(engine->communication_device == DEVICE_TYPE_DEVICE) {
+                gpuErrchk( cudaPeekAtLastError() );
+                gpuErrchk( cudaDeviceSynchronize() );
+            }
+#endif
         }
         tmp_ptr = A_gemm; A_gemm = A_recv; A_recv = tmp_ptr;
         tmp_ptr = B_gemm; B_gemm = B_recv; B_recv = tmp_ptr;
@@ -388,6 +401,12 @@ void cannon_engine_exec_cck(
             MPI_Wait(req_send_B_p, MPI_STATUS_IGNORE);
             MPI_Wait(req_recv_A_p, MPI_STATUS_IGNORE);
             MPI_Wait(req_recv_B_p, MPI_STATUS_IGNORE);
+#if USE_GPU
+            if(engine->communication_device == DEVICE_TYPE_DEVICE) {
+                gpuErrchk( cudaPeekAtLastError() );
+                gpuErrchk( cudaDeviceSynchronize() );
+            }
+#endif
             copy_matrix_block(
                 sizeof(double), local_k, A_m, 
                 A_recv, A_m, A_stack + k_stack_size * A_m, ldAs
