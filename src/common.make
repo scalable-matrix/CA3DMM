@@ -21,7 +21,6 @@ endif
 
 ifeq ($(strip $(USE_MKL)), 1)
 DEFS   += -DUSE_MKL
-CFLAGS += -mkl
 endif
 
 ifeq ($(strip $(USE_OPENBLAS)), 1)
