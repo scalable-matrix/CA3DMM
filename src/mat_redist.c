@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include <mpi.h>
 
+#if USE_GPU
+#include "gpu.h"
+#endif
+
 #include "memory.h"
 #include "mat_redist.h"
 

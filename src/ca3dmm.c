@@ -5,6 +5,10 @@
 #include <math.h>
 #include <mpi.h>
 
+#if USE_GPU
+#include "gpu.h"
+#endif
+
 #include "memory.h"
 #include "partition.h"
 #include "cannon.h"
