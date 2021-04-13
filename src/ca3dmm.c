@@ -5,6 +5,10 @@
 #include <math.h>
 #include <mpi.h>
 
+#if USE_GPU
+#include "gpu.h"
+#endif
+
 #include "memory.h"
 #include "partition.h"
 #include "cannon.h"
@@ -789,6 +793,14 @@ void ca3dmm_engine_exec(
         int recv_ldB = (trans_B) ? B_rd_ncol : B_rd_nrow;   
         mat_redist_engine_exec(engine->redist_A, src_A, ldA, A_rd_recv, recv_ldA);
         mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_rd_recv, recv_ldB);
+
+#if USE_GPU
+        if(engine->communication_device == DEVICE_TYPE_DEVICE) {
+            gpuErrchk( cudaPeekAtLastError() );
+            gpuErrchk( cudaDeviceSynchronize() );
+        }
+#endif
+
         stop_t = MPI_Wtime();
         redist_ms = 1000.0 * (stop_t - start_t);
         engine->redist_ms += redist_ms;
@@ -835,6 +847,13 @@ void ca3dmm_engine_exec(
                     AB_agv_recvcnts, AB_agv_displs, MPI_DOUBLE, engine->comm_AB_agv
                 );
             }
+
+#if USE_GPU
+            if(engine->communication_device == DEVICE_TYPE_DEVICE) {
+                gpuErrchk( cudaPeekAtLastError() );
+                gpuErrchk( cudaDeviceSynchronize() );
+            }
+#endif
         } else {
             B_2dmm = B_trans;
         }  // End of "if (engine->task_m_num > 1)"
@@ -853,6 +872,13 @@ void ca3dmm_engine_exec(
                     AB_agv_recvcnts, AB_agv_displs, MPI_DOUBLE, engine->comm_AB_agv
                 );
             }
+
+#if USE_GPU
+            if(engine->communication_device == DEVICE_TYPE_DEVICE) {
+                gpuErrchk( cudaPeekAtLastError() );
+                gpuErrchk( cudaDeviceSynchronize() );
+            }
+#endif
         } else {
             A_2dmm = A_trans;
         }  // End of "if (engine->task_n_num > 1)"
@@ -888,6 +914,13 @@ void ca3dmm_engine_exec(
                     B_2dmm,  B_2dmm_nrow * B_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0,
                     A_trans, A_2dmm_nrow * A_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0, ce->comm, MPI_STATUS_IGNORE
                 );
+
+#if USE_GPU
+                if(engine->communication_device == DEVICE_TYPE_DEVICE) {
+                    gpuErrchk( cudaPeekAtLastError() );
+                    gpuErrchk( cudaDeviceSynchronize() );
+                }
+#endif
             }
             //gpu_print_mat(A_2dmm, 1, 1);
             //gpu_print_mat(B_2dmm, 1, 1);
