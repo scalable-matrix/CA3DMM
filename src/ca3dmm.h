@@ -21,6 +21,11 @@ struct ca3dmm_engine
     int  task_k_num, task_k_id;     // Total number and index of k dimension task
     int  is_BTB;                    // If this ca3dmm_engine is to compute B^T * B
     int  use_ag, use_rsb;           // If we can use MPI_Allgather/MPI_Reduce_scatter_block instead of MPI_Allgatherv/MPI_Reduce_scatter
+    int  src_A_srow,   src_A_scol;  // 1st row & col of source A matrix block needed by this MPI process in redistribution 
+    int  src_B_srow,   src_B_scol;  // 1st row & col of source B matrix block needed by this MPI process in redistribution 
+    int  src_A_nrow,   src_A_ncol;  // Number of rows & cols of source A matrix block needed by this MPI process in redistribution 
+    int  src_B_nrow,   src_B_ncol;  // Number of rows & cols of source B matrix block needed by this MPI process in redistribution 
+
     int  A_rd_srow,   A_rd_scol;    // 1st row & col of op(A) matrix block needed by this MPI process in redistribution
     int  B_rd_srow,   B_rd_scol;    // 1st row & col of op(B) matrix block needed by this MPI process in redistribution
     int  A_2dmm_srow, A_2dmm_scol;  // 1st row & col of op(A) matrix block needed by this MPI process in 2D matmul
@@ -47,8 +52,9 @@ struct ca3dmm_engine
     MPI_Comm comm_AB_agv;           // Communicator for A or B matrix block MPI_Allgatherv
     MPI_Comm comm_C_rs;             // Communicator for C matrix reduce-scatter
     MPI_Comm comm_2dmm;             // Communicator for 2D matmul in each k_task
-    mat_redist_engine_p redist_A;   // Redistribution of A matrix from its initial layout to CA3DMM required layout
-    mat_redist_engine_p redist_B;   // Redistribution of B matrix from its initial layout to CA3DMM required layout
+    MPI_Comm comm;                  // Input communicator
+    mat_redist_engine_p redist_A;   // Redistribution of A matrix from CA3DMM output layout to required layout
+    mat_redist_engine_p redist_B;   // Redistribution of B matrix from CA3DMM output layout to required layout
     mat_redist_engine_p redist_C;   // Redistribution of C matrix from CA3DMM output layout to required layout
     cannon_engine_p cannon_engine;  // cannon_engine for 2D matmul
 

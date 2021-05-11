@@ -328,6 +328,15 @@ void ca3dmm_engine_init_ex(
         }
         engine->use_ag = use_ag;
     }
+    engine->src_A_srow = src_A_srow;
+    engine->src_A_scol = src_A_scol;
+    engine->src_A_nrow = src_A_nrow;
+    engine->src_A_ncol = src_A_ncol;
+    engine->src_B_srow = src_B_srow;
+    engine->src_B_scol = src_B_scol;
+    engine->src_B_nrow = src_B_nrow;
+    engine->src_B_ncol = src_B_ncol;
+
     engine->A_rd_srow = A_rd_srow;
     engine->A_rd_scol = A_rd_scol;
     engine->A_rd_nrow = A_rd_nrow;
@@ -338,37 +347,9 @@ void ca3dmm_engine_init_ex(
     engine->B_rd_ncol = B_rd_ncol;
     engine->trans_A   = trans_A;
     engine->trans_B   = trans_B;
-    if (trans_A)
-    {
-        swap_int(&A_rd_srow, &A_rd_scol);
-        swap_int(&A_rd_nrow, &A_rd_ncol);
-    }
-    if (trans_B)
-    {
-        swap_int(&B_rd_srow, &B_rd_scol);
-        swap_int(&B_rd_nrow, &B_rd_ncol);
-    }
-    // Non-active processes still need to participate in initial A & B redistribution,
-    // but their {A, B}_rd_{s, n}{row, col} == 0.
-    mat_redist_engine_init_ex(
-        src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
-        A_rd_scol,  A_rd_srow,  A_rd_ncol,  A_rd_nrow, 
-        engine->communication_device,
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
-    );
-    mat_redist_engine_init_ex(
-        src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
-        B_rd_scol,  B_rd_srow,  B_rd_ncol,  B_rd_nrow, 
-        engine->communication_device,
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
-    );
-    if ((engine->redist_A == NULL) || (engine->redist_B == NULL))
-    {
-        ca3dmm_engine_free(&engine);
-        return;
-    }
     engine->AB_agv_recvcnts = AB_agv_recvcnts;
     engine->AB_agv_displs   = AB_agv_displs;
+    engine->comm = comm;
     if (!((dst_C_srow == -1) || (dst_C_nrow == -1) || (dst_C_scol == -1) || (dst_C_ncol == -1)))
     {
         mat_redist_engine_init_ex(
@@ -727,8 +708,7 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
     if (engine->is_BTB == 0) MPI_Comm_free(&engine->comm_AB_agv);
     MPI_Comm_free(&engine->comm_C_rs);
     MPI_Comm_free(&engine->comm_2dmm);
-    mat_redist_engine_free(&engine->redist_A);
-    mat_redist_engine_free(&engine->redist_B);
+    if (engine->is_BTB == 1) mat_redist_engine_free(&engine->redist_B);
     mat_redist_engine_free(&engine->redist_C);
     cannon_engine_free(&engine->cannon_engine);
     free(engine);
@@ -749,12 +729,16 @@ void ca3dmm_engine_exec(
         return;
     }
 
+    int A_rd_srow   = engine->A_rd_srow;
+    int A_rd_scol   = engine->A_rd_scol;
     int A_rd_nrow   = engine->A_rd_nrow;
     int A_rd_ncol   = engine->A_rd_ncol;
     int A_2dmm_nrow = engine->A_2dmm_nrow;
     int A_2dmm_ncol = engine->A_2dmm_ncol;
     int B_rd_nrow   = engine->B_rd_nrow;
     int B_rd_ncol   = engine->B_rd_ncol;
+    int B_rd_srow   = engine->B_rd_srow;
+    int B_rd_scol   = engine->B_rd_scol;
     int B_2dmm_nrow = engine->B_2dmm_nrow;
     int B_2dmm_ncol = engine->B_2dmm_ncol;
     int C_2dmm_nrow = engine->C_2dmm_nrow;
@@ -791,8 +775,50 @@ void ca3dmm_engine_exec(
         int trans_B  = engine->trans_B;
         int recv_ldA = (trans_A) ? A_rd_ncol : A_rd_nrow;
         int recv_ldB = (trans_B) ? B_rd_ncol : B_rd_nrow;   
+
+        int tmp_A_rd_srow = A_rd_srow;
+        int tmp_B_rd_srow = B_rd_srow;
+        int tmp_A_rd_nrow = A_rd_nrow;
+        int tmp_B_rd_nrow = B_rd_nrow;
+        int tmp_A_rd_scol = A_rd_scol;
+        int tmp_B_rd_scol = B_rd_scol;
+        int tmp_A_rd_ncol = A_rd_ncol;
+        int tmp_B_rd_ncol = B_rd_ncol;
+        if (trans_A)
+        {
+            swap_int(&tmp_A_rd_srow, &tmp_A_rd_scol);
+            swap_int(&tmp_A_rd_nrow, &tmp_A_rd_ncol);
+        }
+        if (trans_B)
+        {
+            swap_int(&tmp_B_rd_srow, &tmp_B_rd_scol);
+            swap_int(&tmp_B_rd_nrow, &tmp_B_rd_ncol);
+        }
+
+        // Non-active processes still need to participate in initial A & B redistribution,
+        // but their {A, B}_rd_{s, n}{row, col} == 0.
+        mat_redist_engine_init_ex(
+            engine->src_A_scol, engine->src_A_srow, engine->src_A_ncol, engine->src_A_nrow, 
+            tmp_A_rd_scol,  tmp_A_rd_srow,  tmp_A_rd_ncol,  tmp_A_rd_nrow, 
+            engine->communication_device,
+            engine->comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
+            );
+        assert(engine->redist_A != NULL);
         mat_redist_engine_exec(engine->redist_A, src_A, ldA, A_rd_recv, recv_ldA);
+        mat_redist_engine_free(&engine->redist_A);
+
+
+        mat_redist_engine_init_ex(
+        engine->src_B_scol, engine->src_B_srow, engine->src_B_ncol, engine->src_B_nrow, 
+        tmp_B_rd_scol,  tmp_B_rd_srow,  tmp_B_rd_ncol,  tmp_B_rd_nrow, 
+        engine->communication_device,
+        engine->comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+        );
+
+        assert(engine->redist_B != NULL);
         mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_rd_recv, recv_ldB);
+        mat_redist_engine_free(&engine->redist_B);
+
 
 #if USE_GPU
         if(engine->communication_device == DEVICE_TYPE_DEVICE) {
