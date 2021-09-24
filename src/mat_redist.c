@@ -49,6 +49,7 @@ static void copy_matrix_block(
     const size_t lds_ = dt_size * (size_t) lds;
     const size_t ldd_ = dt_size * (size_t) ldd;
     const size_t row_msize = dt_size * (size_t) ncol;
+    #pragma omp parallel for
     for (int irow = 0; irow < nrow; irow++)
     {
         size_t src_offset = (size_t) irow * lds_;
