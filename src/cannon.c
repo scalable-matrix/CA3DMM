@@ -6,6 +6,7 @@
 #include <mpi.h>
 
 #include "partition.h"
+#include "utils.h"
 #include "cannon.h"
 #include "linalg_lib_wrapper.h"
 
@@ -20,7 +21,7 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     np_dim = (int) sqrt((double) n_proc);
     if (np_dim * np_dim != n_proc)
     {
-        fprintf(stderr, "[ERROR] Communicator size %d is not a square number\n", n_proc);
+        ERROR_PRINTF("Communicator size %d is not a square number\n", n_proc);
         return;
     }
 
@@ -57,16 +58,16 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     int *k_displs = (int *) malloc(sizeof(int) * (np_dim + 1));
     if (m_displs == NULL || n_displs == NULL || k_displs == NULL)
     {
-        fprintf(stderr, "[ERROR] Failed to allocate cannon_engine displacement arrays\n");
+        ERROR_PRINTF("Failed to allocate cannon_engine displacement arrays\n");
         free(engine);
         return;
     }
     for (int i = 0; i <= np_dim; i++)
     {
         int dummy;
-        calc_block_size_pos(m, np_dim, i, &dummy, m_displs + i);
-        calc_block_size_pos(n, np_dim, i, &dummy, n_displs + i);
-        calc_block_size_pos(k, np_dim, i, &dummy, k_displs + i);
+        calc_block_spos_size(m, np_dim, i, m_displs + i, &dummy);
+        calc_block_spos_size(n, np_dim, i, n_displs + i, &dummy);
+        calc_block_spos_size(k, np_dim, i, k_displs + i, &dummy);
     }
     engine->m_displs = m_displs;
     engine->n_displs = n_displs;
@@ -95,7 +96,7 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     void *C_buff = malloc(sizeof(double) * max_C_blk_size);
     if ((A_gemm == NULL) || (A_recv == NULL) || (B_gemm == NULL) || (B_recv == NULL) || (C_buff == NULL))
     {
-        fprintf(stderr, "[ERROR] Failed to allocate cannon_engine matrix buffers\n");
+        ERROR_PRINTF("Failed to allocate cannon_engine matrix buffers\n");
         free(engine);
         return;
     }
@@ -124,11 +125,9 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
 
     int  min_k_blk_size  = 140;
     int  curr_k_blk_size = engine->A_ncol;
-    int  gemm_cycle   = 1;
+    int  gemm_cycle      = 1;
     void *A_stack = NULL, *B_stack = NULL;
-    char *min_k_blk_size_p = getenv("CANNON_MIN_K_BLK_SIZE");
-    if (min_k_blk_size_p != NULL) min_k_blk_size = atoi(min_k_blk_size_p);
-    if (min_k_blk_size < 8) min_k_blk_size = 8;
+    GET_ENV_INT_VAR(min_k_blk_size, "CANNON_MIN_KBLK_SIZE", "min_k_blk_size", 140, 16, 8192);
     if (curr_k_blk_size < min_k_blk_size)
     {
         gemm_cycle = (min_k_blk_size + curr_k_blk_size - 1) / curr_k_blk_size;
@@ -144,24 +143,6 @@ void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, ca
     engine->init_ms = 1000.0 * (stop_t - start_t);
 
     *engine_ = engine;
-}
-
-static void copy_matrix_block(
-    const size_t dt_size, const int nrow, const int ncol, 
-    const void *src, const int lds, void *dst, const int ldd
-)
-{
-    const char *src_ = (char*) src;
-    char *dst_ = (char*) dst;
-    const size_t lds_ = dt_size * (size_t) lds;
-    const size_t ldd_ = dt_size * (size_t) ldd;
-    const size_t row_msize = dt_size * (size_t) ncol;
-    for (int irow = 0; irow < nrow; irow++)
-    {
-        size_t src_offset = (size_t) irow * lds_;
-        size_t dst_offset = (size_t) irow * ldd_;
-        memcpy(dst_ + dst_offset, src_ + src_offset, row_msize);
-    }
 }
 
 // Free a cannon_engine
@@ -350,11 +331,11 @@ void cannon_engine_exec_cck(
     );
     copy_matrix_block(
         sizeof(double), A_recv_k, A_m, 
-        A_recv, A_m, A_stack + k_stack_size * A_m, ldAs
+        A_recv, A_m, A_stack + k_stack_size * A_m, ldAs, 1
     );
     copy_matrix_block(
         sizeof(double), B_n, B_recv_k, 
-        B_recv, B_recv_k, B_stack + k_stack_size, ldBs
+        B_recv, B_recv_k, B_stack + k_stack_size, ldBs, 1
     );
     k_stack_size += A_recv_k;
     MPI_Barrier(comm);
@@ -377,11 +358,11 @@ void cannon_engine_exec_cck(
             MPI_Wait(req_recv_B_p, MPI_STATUS_IGNORE);
             copy_matrix_block(
                 sizeof(double), local_k, A_m, 
-                A_recv, A_m, A_stack + k_stack_size * A_m, ldAs
+                A_recv, A_m, A_stack + k_stack_size * A_m, ldAs, 1
             );
             copy_matrix_block(
                 sizeof(double), B_n, local_k, 
-                B_recv, local_k, B_stack + k_stack_size, ldBs
+                B_recv, local_k, B_stack + k_stack_size, ldBs, 1
             );
             k_stack_size += local_k;
         }
@@ -449,7 +430,7 @@ void cannon_engine_exec(
 {
     if (engine == NULL)
     {
-        fprintf(stderr, "[ERROR] canon_engine not initialized\n");
+        ERROR_PRINTF("cannon_engine not initialized\n");
         return;
     }
 
@@ -498,7 +479,7 @@ void cannon_engine_print_stat(cannon_engine_p engine)
     if (engine == NULL) return;
     if (engine->n_exec == 0)
     {
-        printf("No cannon_engine statistic data to print\n");
+        WARNING_PRINTF("No cannon_engine statistic data to print\n");
         return;
     }
     double GFlops = (double) engine->C_nrow * (double) engine->C_ncol * (double) engine->k;

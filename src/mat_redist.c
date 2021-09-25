@@ -4,6 +4,7 @@
 #include <mpi.h>
 
 #include "mat_redist.h"
+#include "utils.h"
 
 static void calc_seg_intersection(
     int s0, int e0, int s1, int e1, 
@@ -37,25 +38,6 @@ static void calc_rect_intersection(
     calc_seg_intersection(xs0, xe0, xs1, xe1, is_intersect, ixs, ixe);
     if (*is_intersect == 0) return;
     calc_seg_intersection(ys0, ye0, ys1, ye1, is_intersect, iys, iye);
-}
-
-static void copy_matrix_block(
-    const size_t dt_size, const int nrow, const int ncol, 
-    const void *src, const int lds, void *dst, const int ldd
-)
-{
-    const char *src_ = (char*) src;
-    char *dst_ = (char*) dst;
-    const size_t lds_ = dt_size * (size_t) lds;
-    const size_t ldd_ = dt_size * (size_t) ldd;
-    const size_t row_msize = dt_size * (size_t) ncol;
-    #pragma omp parallel for
-    for (int irow = 0; irow < nrow; irow++)
-    {
-        size_t src_offset = (size_t) irow * lds_;
-        size_t dst_offset = (size_t) irow * ldd_;
-        memcpy(dst_ + dst_offset, src_ + src_offset, row_msize);
-    }
 }
 
 // Set up a mat_redist_engine_s for redistributing a 2D partitioned matrix
@@ -133,7 +115,7 @@ void mat_redist_engine_init(
     void *send_buf    = (void*) malloc(dt_size     * send_cnt);
     if (send_ranks == NULL || send_sizes == NULL || send_displs == NULL || sblk_sizes == NULL || send_buf == NULL)
     {
-        fprintf(stderr, "[ERROR] Failed to allocate send_info (size %d) or send_buf (size %d)\n", 7 * n_proc_send, send_cnt);
+        ERROR_PRINTF("Failed to allocate send_info (size %d) or send_buf (size %d)\n", 7 * n_proc_send, send_cnt);
         free(engine);
         *engine_ = NULL;
         return;
@@ -194,7 +176,7 @@ void mat_redist_engine_init(
     void *recv_buf    = (void*) malloc(dt_size     * recv_cnt);
     if (recv_ranks == NULL || recv_sizes == NULL || recv_displs == NULL || rblk_sizes == NULL || recv_buf == NULL)
     {
-        fprintf(stderr, "[ERROR] Failed to allocate recv_info (size %d) or recv_buf (size %d)\n", 7 * n_proc_recv, recv_cnt);
+        ERROR_PRINTF("Failed to allocate recv_info (size %d) or recv_buf (size %d)\n", 7 * n_proc_recv, recv_cnt);
         free(engine);
         *engine_ = NULL;
         return;
@@ -263,7 +245,7 @@ void mat_redist_engine_exec(
 {
     if (engine == NULL)
     {
-        fprintf(stderr, "[ERROR] engine == NULL\n");
+        WARNING_PRINTF("mat_redist_engine not initialized\n");
         return;
     }
 
@@ -289,7 +271,7 @@ void mat_redist_engine_exec(
         int local_scol  = i_send_scol - src_scol;
         char *i_send_buf  = send_buf + dt_size * send_displs[isend];
         const char *i_send_src = src_blk_ + dt_size * (local_srow * src_ld + local_scol);
-        copy_matrix_block(dt_size, i_send_nrow, i_send_ncol, i_send_src, src_ld, i_send_buf, i_send_ncol);
+        copy_matrix_block(dt_size, i_send_nrow, i_send_ncol, i_send_src, src_ld, i_send_buf, i_send_ncol, 1);
     }  // End of isend loop
 
     // Redistribute data using MPI_Neighbor_alltoallv
@@ -318,7 +300,7 @@ void mat_redist_engine_exec(
         int local_scol  = i_recv_scol - req_scol;
         char *i_recv_buf = recv_buf + dt_size * recv_displs[irecv];
         char *i_recv_dst = dst_blk_ + dt_size * (local_srow * dst_ld + local_scol);
-        copy_matrix_block(dt_size, i_recv_nrow, i_recv_ncol, i_recv_buf, i_recv_ncol, i_recv_dst, dst_ld);
+        copy_matrix_block(dt_size, i_recv_nrow, i_recv_ncol, i_recv_buf, i_recv_ncol, i_recv_dst, dst_ld, 1);
     }  // End of recv_cnt loop
 
     MPI_Barrier(engine->comm);

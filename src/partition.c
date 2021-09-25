@@ -5,32 +5,6 @@
 
 #include "partition.h"
 
-// Partition an array into multiple same-size blocks and return the 
-// start position of a given block
-void calc_block_size_pos(
-    const int len, const int n_blk, const int i_blk,
-    int *blk_size, int *blk_spos
-)
-{
-    if (i_blk < 0 || i_blk > n_blk)
-    {
-        *blk_spos = -1;
-        *blk_size = 0;
-        return;
-    }
-    int rem = len % n_blk;
-    int bs0 = len / n_blk;
-    int bs1 = bs0 + 1;
-    if (i_blk < rem) 
-    {
-        *blk_spos = bs1 * i_blk;
-        *blk_size = bs1;
-    } else {
-        *blk_spos = bs0 * i_blk + rem;
-        *blk_size = bs0;
-    }
-}
-
 double max_min_ratio(const int n_elem, double *a)
 {
     double maxval = a[0];

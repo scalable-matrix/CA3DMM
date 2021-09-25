@@ -8,6 +8,7 @@
 
 #include "ca3dmm.h"
 #include "example_utils.h"
+#include "utils.h"  // in CA3DMM's include/
 
 int main(int argc, char **argv)
 {
@@ -60,8 +61,8 @@ int main(int argc, char **argv)
     B_in_nrow  = B_nrow;
     C_out_srow = 0;
     C_out_nrow = C_nrow;
-    calc_block_size_pos(B_ncol, n_proc, my_rank, &B_in_ncol,  &B_in_scol);
-    calc_block_size_pos(C_ncol, n_proc, my_rank, &C_out_ncol, &C_out_scol);
+    calc_block_spos_size(B_ncol, n_proc, my_rank,  &B_in_scol, &B_in_ncol);
+    calc_block_spos_size(C_ncol, n_proc, my_rank, &C_out_scol, &C_out_ncol);
     size_t B_in_msize  = sizeof(double) * (size_t) B_in_nrow  * (size_t) B_in_ncol;
     size_t C_out_msize = sizeof(double) * (size_t) C_out_nrow * (size_t) C_out_ncol;
     double *B_in  = (double *) malloc(B_in_msize);

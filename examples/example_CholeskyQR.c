@@ -8,6 +8,7 @@
 
 #include "ca3dmm.h"
 #include "example_utils.h"
+#include "utils.h"  // in CA3DMM's include/
 
 int main(int argc, char **argv)
 {
@@ -85,7 +86,7 @@ int main(int argc, char **argv)
         S0_ncol = 0;
     }
     S1_srow = 0;  S1_nrow = B_ncol;
-    calc_block_size_pos(B_ncol, n_proc, my_rank, &S1_ncol, &S1_scol);
+    calc_block_spos_size(B_ncol, n_proc, my_rank, &S1_scol, &S1_ncol);
     double *S0 = (double *) malloc(sizeof(double) * S0_nrow * S0_ncol);
     double *S1 = (double *) malloc(sizeof(double) * S1_nrow * S1_ncol);
 
