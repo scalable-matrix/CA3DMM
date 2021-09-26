@@ -17,6 +17,10 @@ struct cannon_engine
     int  B_nrow, B_ncol;        // Number of rows & cols of B matrix block needed by this MPI process
     int  C_nrow, C_ncol;        // Number of rows & cols of C matrix block calculated by this MPI process
     int  gemm_cycle;            // Number of P2P shift steps before a local GEMM compute
+    int  max_A_blk_size;        // Maximum A block size (number of elements)
+    int  max_B_blk_size;        // Maximum B block size (number of elements)
+    int  max_C_blk_size;        // Maximum C block size (number of elements)
+    int  alloc_workbuf;         // If work_buf is allocated by mat_redist_engine
     int  *m_displs;             // Size np_dim+1, partitioning displacements on the m dimension
     int  *n_displs;             // Size np_dim+1, partitioning displacements on the n dimension
     int  *k_displs;             // Size np_dim+1, partitioning displacements on the k dimension
@@ -27,6 +31,7 @@ struct cannon_engine
     void *B_recv;               // Size (k/np_dim + 1) * (n/np_dim + 1), B block receive buffer
     void *B_stack;              // Size (k/np_dim + 1) * (n/np_dim + 1) * gemm_cycle, stacked B blocks
     void *C_buff;               // Size (m/np_dim + 1) * (n/np_dim + 1), C block result buffer
+    void *work_buf;             // Work buffer, all arrays above are alias to work_buf
     MPI_Comm    comm;           // Target MPI communicator
     MPI_Request req_send_A[2];  // MPI requests for sending   A to   left  rank
     MPI_Request req_send_B[2];  // MPI requests for sending   B to   upper rank
@@ -51,8 +56,21 @@ extern "C" {
 // Initialize a cannon_engine for 2D Cannon matrix multiplication algorithm
 // Input parameters: see the cannon_engine structure above
 // Output parameters: 
-//   *engine_ : An initialized cannon_engine
-void cannon_engine_init(const int m, const int n, const int k, MPI_Comm comm, cannon_engine_p *engine_);
+//   *engine_        : An initialized cannon_engine
+//   *workbuf_bytes  : Optional. If pointer is not NULL, the returning value is the size 
+//                     of work buffer, and cannon_engine will not allocate work buffer.
+//                     If pointer is NULL, cannon_engine will allocate and free work buffer.
+void cannon_engine_init(
+    const int m, const int n, const int k, 
+    MPI_Comm comm, cannon_engine_p *engine_, size_t *workbuf_bytes
+);
+
+
+// Attach an external work buffer for cannon_engine
+// Input parameters:
+//   engine   : Initialized cannon_engine_p
+//   work_buf : Work buffer, size >= *workbuf_bytes returned by mat_redist_engine_init()
+void cannon_engine_attach_workbuf(cannon_engine_p engine, void *work_buf);
 
 // Free a cannon_engine
 void cannon_engine_free(cannon_engine_p *engine_);

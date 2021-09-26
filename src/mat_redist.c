@@ -44,7 +44,8 @@ static void calc_rect_intersection(
 void mat_redist_engine_init(
     const int src_srow, const int src_scol, const int src_nrow, const int src_ncol, 
     const int req_srow, const int req_scol, const int req_nrow, const int req_ncol,
-    MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, mat_redist_engine_p *engine_
+    MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, mat_redist_engine_p *engine_,
+    size_t *workbuf_bytes
 )
 {
     mat_redist_engine_p engine = (mat_redist_engine_p) malloc(sizeof(mat_redist_engine_s));
@@ -53,19 +54,19 @@ void mat_redist_engine_init(
     int nproc, rank;
     MPI_Comm_size(comm, &nproc);
     MPI_Comm_rank(comm, &rank);
-    //engine->comm     = comm;
-    engine->rank     = rank;
-    engine->nproc    = nproc;
-    engine->dtype    = dtype;
-    engine->dt_size  = dt_size;
-    engine->src_srow = src_srow;
-    engine->src_nrow = src_nrow;
-    engine->src_scol = src_scol;
-    engine->src_ncol = src_ncol;
-    engine->req_srow = req_srow;
-    engine->req_nrow = req_nrow;
-    engine->req_scol = req_scol;
-    engine->req_ncol = req_ncol;
+    engine->input_comm = comm;
+    engine->rank       = rank;
+    engine->nproc      = nproc;
+    engine->dtype      = dtype;
+    engine->dt_size    = dt_size;
+    engine->src_srow   = src_srow;
+    engine->src_nrow   = src_nrow;
+    engine->src_scol   = src_scol;
+    engine->src_ncol   = src_ncol;
+    engine->req_srow   = req_srow;
+    engine->req_nrow   = req_nrow;
+    engine->req_scol   = req_scol;
+    engine->req_ncol   = req_ncol;
 
     // Gather all processes' source and required block info
     int src_erow = src_srow + src_nrow - 1;
@@ -108,38 +109,9 @@ void mat_redist_engine_init(
             send_cnt += send_info0_i[2] * send_info0_i[3];
         }
     }  // End of iproc loop
-    int  *send_ranks  = (int*)  malloc(sizeof(int) * n_proc_send);
-    int  *send_sizes  = (int*)  malloc(sizeof(int) * n_proc_send);
-    int  *send_displs = (int*)  malloc(sizeof(int) * (n_proc_send + 1));
-    int  *sblk_sizes  = (int*)  malloc(sizeof(int) * n_proc_send * 4);
-    void *send_buf    = (void*) malloc(dt_size     * send_cnt);
-    if (send_ranks == NULL || send_sizes == NULL || send_displs == NULL || sblk_sizes == NULL || send_buf == NULL)
-    {
-        ERROR_PRINTF("Failed to allocate send_info (size %d) or send_buf (size %d)\n", 7 * n_proc_send, send_cnt);
-        free(engine);
-        *engine_ = NULL;
-        return;
-    }
-    for (int i = 0; i < n_proc_send; i++)
-    {
-        int *send_info0_i = send_info0 + i * 6;
-        int *sblk_size_i  = sblk_sizes + i * 4;
-        sblk_size_i[0] = send_info0_i[0];
-        sblk_size_i[1] = send_info0_i[1];
-        sblk_size_i[2] = send_info0_i[2];
-        sblk_size_i[3] = send_info0_i[3];
-        send_ranks[i]  = send_info0_i[4];
-        send_displs[i] = send_info0_i[5];
-        send_sizes[i]  = sblk_size_i[2] * sblk_size_i[3];
-    }
-    send_displs[n_proc_send] = send_cnt;
     engine->n_proc_send = n_proc_send;
-    engine->send_ranks  = send_ranks;
-    engine->send_sizes  = send_sizes;
-    engine->send_displs = send_displs;
-    engine->sblk_sizes  = sblk_sizes;
-    engine->send_buf    = send_buf;
-    free(send_info0);
+    engine->send_cnt    = send_cnt;
+    engine->send_info0  = send_info0;
 
     // Calculate recv_info
     int recv_cnt = 0, n_proc_recv = 0;
@@ -169,18 +141,99 @@ void mat_redist_engine_init(
             recv_cnt += recv_info0_i[2] * recv_info0_i[3];
         }
     }  // End of iproc loop
-    int  *recv_ranks  = (int*)  malloc(sizeof(int) * n_proc_recv);
-    int  *recv_sizes  = (int*)  malloc(sizeof(int) * n_proc_recv);
-    int  *recv_displs = (int*)  malloc(sizeof(int) * (n_proc_recv + 1));
-    int  *rblk_sizes  = (int*)  malloc(sizeof(int) * n_proc_recv * 4);
-    void *recv_buf    = (void*) malloc(dt_size     * recv_cnt);
-    if (recv_ranks == NULL || recv_sizes == NULL || recv_displs == NULL || rblk_sizes == NULL || recv_buf == NULL)
+    engine->n_proc_recv = n_proc_recv;
+    engine->recv_cnt    = recv_cnt;
+    engine->recv_info0  = recv_info0;
+
+    size_t workbuf_bytes_ = 0;
+    workbuf_bytes_ += sizeof(int) * n_proc_send;        // send_ranks
+    workbuf_bytes_ += sizeof(int) * n_proc_send;        // send_sizes
+    workbuf_bytes_ += sizeof(int) * (n_proc_send + 1);  // send_displs
+    workbuf_bytes_ += sizeof(int) * n_proc_send * 4;    // sblk_sizes
+    workbuf_bytes_ += sizeof(int) * n_proc_recv;        // recv_ranks
+    workbuf_bytes_ += sizeof(int) * n_proc_recv;        // recv_sizes
+    workbuf_bytes_ += sizeof(int) * (n_proc_recv + 1);  // recv_displs
+    workbuf_bytes_ += sizeof(int) * n_proc_recv * 4;    // rblk_sizes
+    workbuf_bytes_ += dt_size     * send_cnt;           // send_buf
+    workbuf_bytes_ += dt_size     * recv_cnt;           // recv_buf
+
+    if (workbuf_bytes != NULL)
     {
-        ERROR_PRINTF("Failed to allocate recv_info (size %d) or recv_buf (size %d)\n", 7 * n_proc_recv, recv_cnt);
-        free(engine);
-        *engine_ = NULL;
+        engine->alloc_workbuf = 0;
+        *workbuf_bytes = workbuf_bytes_;
+    } else {
+        engine->alloc_workbuf = 1;
+        void *work_buf = malloc(workbuf_bytes_);
+        mat_redist_engine_attach_workbuf(engine, work_buf);
+    }
+
+    free(all_src_req_info);
+    *engine_ = engine;
+
+    MPI_Barrier(engine->input_comm);
+}
+
+// Attach an external work buffer for mat_redist_engine
+void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf)
+{
+    if (engine == NULL)
+    {
+        WARNING_PRINTF("mat_redist_engine not initialized\n");
         return;
     }
+
+    const int n_proc_send = engine->n_proc_send;
+    const int n_proc_recv = engine->n_proc_recv;
+    const int dt_size     = engine->dt_size;
+    const int send_cnt    = engine->send_cnt;
+    const int recv_cnt    = engine->recv_cnt;
+
+    // Assign work buffer
+    engine->send_ranks  = (int *) work_buf;
+    engine->send_sizes  = engine->send_ranks  + n_proc_send;
+    engine->send_displs = engine->send_sizes  + n_proc_send;
+    engine->sblk_sizes  = engine->send_displs + (n_proc_send + 1);
+    engine->recv_ranks  = engine->sblk_sizes  + n_proc_send * 4;
+    engine->recv_sizes  = engine->recv_ranks  + n_proc_recv;
+    engine->recv_displs = engine->recv_sizes  + n_proc_recv;
+    engine->rblk_sizes  = engine->recv_displs + (n_proc_recv + 1);
+
+    char *work_buf1  = (char *) (engine->rblk_sizes + n_proc_recv * 4);
+    engine->send_buf = (void *) work_buf1;
+    work_buf1 += dt_size * send_cnt;
+    engine->recv_buf = (void *) work_buf1;
+    work_buf1 += dt_size * recv_cnt;
+
+    engine->work_buf = work_buf;
+
+    // Set up send blocks metadata
+    int *send_info0  = engine->send_info0;
+    int *sblk_sizes  = engine->sblk_sizes;
+    int *send_ranks  = engine->send_ranks;
+    int *send_displs = engine->send_displs;
+    int *send_sizes  = engine->send_sizes;
+    for (int i = 0; i < n_proc_send; i++)
+    {
+        int *send_info0_i = send_info0 + i * 6;
+        int *sblk_size_i  = sblk_sizes + i * 4;
+        sblk_size_i[0] = send_info0_i[0];
+        sblk_size_i[1] = send_info0_i[1];
+        sblk_size_i[2] = send_info0_i[2];
+        sblk_size_i[3] = send_info0_i[3];
+        send_ranks[i]  = send_info0_i[4];
+        send_displs[i] = send_info0_i[5];
+        send_sizes[i]  = sblk_size_i[2] * sblk_size_i[3];
+    }
+    send_displs[n_proc_send] = send_cnt;
+    free(engine->send_info0);
+    engine->send_info0 = NULL;
+
+    // Set up receive blocks metadata
+    int *recv_info0  = engine->recv_info0;
+    int *rblk_sizes  = engine->rblk_sizes;
+    int *recv_ranks  = engine->recv_ranks;
+    int *recv_displs = engine->recv_displs;
+    int *recv_sizes  = engine->recv_sizes;
     for (int i = 0; i < n_proc_recv; i++)
     {
         int *recv_info0_i = recv_info0 + i * 6;
@@ -194,28 +247,15 @@ void mat_redist_engine_init(
         recv_sizes[i]  = rblk_size_i[2] * rblk_size_i[3];
     }
     recv_displs[n_proc_recv] = recv_cnt;
-    engine->n_proc_recv = n_proc_recv;
-    engine->recv_ranks  = recv_ranks;
-    engine->recv_sizes  = recv_sizes;
-    engine->recv_displs = recv_displs;
-    engine->rblk_sizes  = rblk_sizes;
-    engine->recv_buf    = recv_buf;
-    free(recv_info0);
+    free(engine->recv_info0);
+    engine->recv_info0 = NULL;
 
     // Build a new communicator with graph info
     int reorder = 0;
-    MPI_Info mpi_info;
-    MPI_Info_create(&mpi_info);
     MPI_Dist_graph_create_adjacent(
-        comm, n_proc_recv, recv_ranks, MPI_UNWEIGHTED, n_proc_send, 
-        send_ranks, MPI_UNWEIGHTED, mpi_info, reorder, &engine->comm
+        engine->input_comm, n_proc_recv, recv_ranks, MPI_UNWEIGHTED, n_proc_send, 
+        send_ranks, MPI_UNWEIGHTED, MPI_INFO_NULL, reorder, &engine->graph_comm
     );
-    MPI_Info_free(&mpi_info);
-
-    free(all_src_req_info);
-    *engine_ = engine;
-
-    MPI_Barrier(engine->comm);
 }
 
 // Destroy a mat_redist_engine_s
@@ -223,16 +263,8 @@ void mat_redist_engine_free(mat_redist_engine_p *engine_)
 {
     mat_redist_engine_p engine = *engine_;
     if (engine == NULL) return;
-    free(engine->send_ranks);
-    free(engine->send_sizes);
-    free(engine->send_displs);
-    free(engine->sblk_sizes);
-    free(engine->recv_ranks);
-    free(engine->recv_sizes);
-    free(engine->recv_displs);
-    free(engine->rblk_sizes);
-    free(engine->send_buf);
-    free(engine->recv_buf);
+    if (engine->alloc_workbuf) free(engine->work_buf);
+    MPI_Comm_free(&engine->graph_comm);
     free(engine);
     *engine_ = NULL;
 }
@@ -280,7 +312,7 @@ void mat_redist_engine_exec(
     void *recv_buf    = engine->recv_buf;
     MPI_Neighbor_alltoallv(
         send_buf, send_sizes, send_displs, engine->dtype, 
-        recv_buf, recv_sizes, recv_displs, engine->dtype, engine->comm
+        recv_buf, recv_sizes, recv_displs, engine->dtype, engine->graph_comm
     );
 
     // Repack received blocks
@@ -303,5 +335,5 @@ void mat_redist_engine_exec(
         copy_matrix_block(dt_size, i_recv_nrow, i_recv_ncol, i_recv_buf, i_recv_ncol, i_recv_dst, dst_ld, 1);
     }  // End of recv_cnt loop
 
-    MPI_Barrier(engine->comm);
+    MPI_Barrier(engine->graph_comm);
 }

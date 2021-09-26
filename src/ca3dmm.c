@@ -173,7 +173,7 @@ void ca3dmm_engine_init(
         calc_block_spos_size(m, task_m_num, task_m_id, &task_m_spos, &task_m_size);
         calc_block_spos_size(n, task_n_num, task_n_id, &task_n_spos, &task_n_size);
         calc_block_spos_size(k, task_k_num, task_k_id, &task_k_spos, &task_k_size);
-        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine);
+        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine, NULL);
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
         {
@@ -310,12 +310,12 @@ void ca3dmm_engine_init(
     mat_redist_engine_init(
         src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
         A_rd_scol,  A_rd_srow,  A_rd_ncol,  A_rd_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_A, NULL
     );
     mat_redist_engine_init(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         B_rd_scol,  B_rd_srow,  B_rd_ncol,  B_rd_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, NULL
     );
     if ((engine->redist_A == NULL) || (engine->redist_B == NULL))
     {
@@ -329,7 +329,7 @@ void ca3dmm_engine_init(
         mat_redist_engine_init(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
-            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, NULL
         );
         if (engine->redist_C == NULL)
         {
@@ -491,7 +491,7 @@ void ca3dmm_engine_init_BTB(
         calc_block_spos_size(m, task_m_num, task_m_id, &task_m_spos, &task_m_size);
         calc_block_spos_size(n, task_n_num, task_n_id, &task_n_spos, &task_n_size);
         calc_block_spos_size(k, task_k_num, task_k_id, &task_k_spos, &task_k_size);
-        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine);
+        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine, NULL);
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
         {
@@ -566,7 +566,7 @@ void ca3dmm_engine_init_BTB(
     mat_redist_engine_init(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         engine->B_2dmm_scol, engine->B_2dmm_srow, engine->B_2dmm_ncol, engine->B_2dmm_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, NULL
     );
     if (engine->redist_B == NULL)
     {
@@ -578,7 +578,7 @@ void ca3dmm_engine_init_BTB(
         mat_redist_engine_init(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
-            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, NULL
         );
         if (engine->redist_C == NULL)
         {
