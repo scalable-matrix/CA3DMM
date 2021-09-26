@@ -20,7 +20,7 @@ struct cannon_engine
     int  max_A_blk_size;        // Maximum A block size (number of elements)
     int  max_B_blk_size;        // Maximum B block size (number of elements)
     int  max_C_blk_size;        // Maximum C block size (number of elements)
-    int  alloc_workbuf;         // If work_buf is allocated by mat_redist_engine
+    int  alloc_workbuf;         // If work_buf is allocated by cannon_engine
     int  *m_displs;             // Size np_dim+1, partitioning displacements on the m dimension
     int  *n_displs;             // Size np_dim+1, partitioning displacements on the n dimension
     int  *k_displs;             // Size np_dim+1, partitioning displacements on the k dimension
@@ -65,11 +65,10 @@ void cannon_engine_init(
     MPI_Comm comm, cannon_engine_p *engine_, size_t *workbuf_bytes
 );
 
-
 // Attach an external work buffer for cannon_engine
 // Input parameters:
 //   engine   : Initialized cannon_engine_p
-//   work_buf : Work buffer, size >= *workbuf_bytes returned by mat_redist_engine_init()
+//   work_buf : Work buffer, size >= *workbuf_bytes returned by cannon_engine_init()
 void cannon_engine_attach_workbuf(cannon_engine_p engine, void *work_buf);
 
 // Free a cannon_engine

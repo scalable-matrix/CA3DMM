@@ -97,6 +97,12 @@ void cannon_engine_init(
     } else {
         engine->alloc_workbuf = 1;
         void *work_buf = malloc(workbuf_bytes_);
+        if (work_buf == NULL)
+        {
+            ERROR_PRINTF("Failed to allocate work buffer of size %zu bytes for cannon_engine\n", workbuf_bytes_);
+            cannon_engine_free(&engine);
+            return;
+        }
         cannon_engine_attach_workbuf(engine, work_buf);
     }
 
@@ -134,6 +140,7 @@ void cannon_engine_attach_workbuf(cannon_engine_p engine, void *work_buf)
         engine->A_stack = NULL;
         engine->B_stack = NULL;
     }
+    engine->work_buf = work_buf;
 
     // No need to use external work buffer for integer arrays,
     // these arrays should be accessed on host
@@ -149,22 +156,25 @@ void cannon_engine_attach_workbuf(cannon_engine_p engine, void *work_buf)
     }
 
     // Set up MPI_Send and MPI_Recv requests
-    const int left_col   = (rank_col - 1 + np_dim) % np_dim;
-    const int right_col  = (rank_col + 1) % np_dim;
-    const int upper_row  = (rank_row - 1 + np_dim) % np_dim;
-    const int lower_row  = (rank_row + 1) % np_dim;
-    const int left_rank  = rank_row  * np_dim + left_col;
-    const int right_rank = rank_row  * np_dim + right_col;
-    const int lower_rank = lower_row * np_dim + rank_col;
-    const int upper_rank = upper_row * np_dim + rank_col;
-    MPI_Send_init(engine->A_gemm, max_A_blk_size, MPI_DOUBLE, left_rank,  0, engine->comm, &engine->req_send_A[0]);
-    MPI_Send_init(engine->A_recv, max_A_blk_size, MPI_DOUBLE, left_rank,  1, engine->comm, &engine->req_send_A[1]);
-    MPI_Send_init(engine->B_gemm, max_B_blk_size, MPI_DOUBLE, upper_rank, 0, engine->comm, &engine->req_send_B[0]);
-    MPI_Send_init(engine->B_recv, max_B_blk_size, MPI_DOUBLE, upper_rank, 1, engine->comm, &engine->req_send_B[1]);
-    MPI_Recv_init(engine->A_recv, max_A_blk_size, MPI_DOUBLE, right_rank, 0, engine->comm, &engine->req_recv_A[0]);
-    MPI_Recv_init(engine->A_gemm, max_A_blk_size, MPI_DOUBLE, right_rank, 1, engine->comm, &engine->req_recv_A[1]);
-    MPI_Recv_init(engine->B_recv, max_B_blk_size, MPI_DOUBLE, lower_rank, 0, engine->comm, &engine->req_recv_B[0]);
-    MPI_Recv_init(engine->B_gemm, max_B_blk_size, MPI_DOUBLE, lower_rank, 1, engine->comm, &engine->req_recv_B[1]);
+    if (engine->work_buf != NULL)
+    {
+        const int left_col   = (rank_col - 1 + np_dim) % np_dim;
+        const int right_col  = (rank_col + 1) % np_dim;
+        const int upper_row  = (rank_row - 1 + np_dim) % np_dim;
+        const int lower_row  = (rank_row + 1) % np_dim;
+        const int left_rank  = rank_row  * np_dim + left_col;
+        const int right_rank = rank_row  * np_dim + right_col;
+        const int lower_rank = lower_row * np_dim + rank_col;
+        const int upper_rank = upper_row * np_dim + rank_col;
+        MPI_Send_init(engine->A_gemm, max_A_blk_size, MPI_DOUBLE, left_rank,  0, engine->comm, &engine->req_send_A[0]);
+        MPI_Send_init(engine->A_recv, max_A_blk_size, MPI_DOUBLE, left_rank,  1, engine->comm, &engine->req_send_A[1]);
+        MPI_Send_init(engine->B_gemm, max_B_blk_size, MPI_DOUBLE, upper_rank, 0, engine->comm, &engine->req_send_B[0]);
+        MPI_Send_init(engine->B_recv, max_B_blk_size, MPI_DOUBLE, upper_rank, 1, engine->comm, &engine->req_send_B[1]);
+        MPI_Recv_init(engine->A_recv, max_A_blk_size, MPI_DOUBLE, right_rank, 0, engine->comm, &engine->req_recv_A[0]);
+        MPI_Recv_init(engine->A_gemm, max_A_blk_size, MPI_DOUBLE, right_rank, 1, engine->comm, &engine->req_recv_A[1]);
+        MPI_Recv_init(engine->B_recv, max_B_blk_size, MPI_DOUBLE, lower_rank, 0, engine->comm, &engine->req_recv_B[0]);
+        MPI_Recv_init(engine->B_gemm, max_B_blk_size, MPI_DOUBLE, lower_rank, 1, engine->comm, &engine->req_recv_B[1]);
+    }
 }
 
 // Free a cannon_engine
@@ -176,15 +186,18 @@ void cannon_engine_free(cannon_engine_p *engine_)
     free(engine->m_displs);
     free(engine->n_displs);
     free(engine->k_displs);
-    MPI_Comm_free(&engine->comm);
-    for (int i = 0; i < 2; i++)
+    if (engine->work_buf != NULL)
     {
-        MPI_Request_free(&engine->req_send_A[i]);
-        MPI_Request_free(&engine->req_send_B[i]);
-        MPI_Request_free(&engine->req_recv_A[i]);
-        MPI_Request_free(&engine->req_recv_B[i]);
+        MPI_Comm_free(&engine->comm);
+        for (int i = 0; i < 2; i++)
+        {
+            MPI_Request_free(&engine->req_send_A[i]);
+            MPI_Request_free(&engine->req_send_B[i]);
+            MPI_Request_free(&engine->req_recv_A[i]);
+            MPI_Request_free(&engine->req_recv_B[i]);
+        }
+        free(engine);
     }
-    free(engine);
     *engine_ = NULL;
 }
 

@@ -109,13 +109,16 @@ int main(int argc, char **argv)
 
     // Initialize ca3dmm_engine
     ca3dmm_engine_p ce;
+    size_t ce_workbuf_bytes;
     ca3dmm_engine_init(
         m, n, k, trans_A, trans_B, 
         A_in_srow,  A_in_nrow,  A_in_scol,  A_in_ncol,
         B_in_srow,  B_in_nrow,  B_in_scol,  B_in_ncol,
         C_out_srow, C_out_nrow, C_out_scol, C_out_ncol,
-        NULL, MPI_COMM_WORLD, &ce
+        NULL, MPI_COMM_WORLD, &ce, &ce_workbuf_bytes
     );
+    void *ce_work_buf = malloc(ce_workbuf_bytes);
+    ca3dmm_engine_attach_workbuf(ce, ce_work_buf);
     if (ce->my_rank == 0)
     {
         int mb = (m + ce->mp - 1) / ce->mp;
@@ -125,11 +128,13 @@ int main(int argc, char **argv)
         min_comm_vol = 3.0 * pow(min_comm_vol, 2.0/3.0) * (double) n_proc;
         double curr_comm_vol = (double) (mb * nb) + (double) (mb * kb) + (double) (nb * kb);
         curr_comm_vol *= (double) n_proc;
+        double ce_workbuf_mb = (double) ce_workbuf_bytes / 1048576.0;
         printf("CA3DMM partition info:\n");
         printf("Process grid mp * np * kp  : %d * %d * %d\n", ce->mp, ce->np, ce->kp);
         printf("Work cuboid  mb * nb * kb  : %d * %d * %d\n", mb, nb, kb);
         printf("Process utilization        : %.2f %% \n", 100.0 * (1.0 - (double) ce->rp / (double) n_proc));
         printf("Comm. volume / lower bound : %.2f\n", curr_comm_vol / min_comm_vol);
+        printf("Rank 0 work buffer size    : %.2f MBytes\n", ce_workbuf_mb);
         printf("\n");
         fflush(stdout);
     }
@@ -282,6 +287,7 @@ int main(int argc, char **argv)
     free(B_in);
     free(C_out);
     ca3dmm_engine_free(&ce);
+    free(ce_work_buf);
     MPI_Finalize();
     return 0;
 }

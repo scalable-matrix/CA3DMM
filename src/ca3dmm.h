@@ -33,6 +33,7 @@ struct ca3dmm_engine
     int  B_2dmm_nrow, B_2dmm_ncol;  // Number of rows & cols of op(B) matrix block needed by this MPI process in 2D matmul
     int  C_2dmm_nrow, C_2dmm_ncol;  // Number of rows & cols of C matrix block calculated by this MPI process in 2D matmul
     int  C_out_nrow,  C_out_ncol;   // Number of rows & cols of output C matrix block owned by this MPI process
+    int  alloc_workbuf;             // If work_buf is allocated by cannon_engine
     int  *AB_agv_recvcnts;          // Size unknown, recvcounts array used in MPI_Allgatherv after redistribution for A or B matrix
     int  *AB_agv_displs;            // Size unknown, displs array used in MPI_Allgatherv after redistribution for A or B matrix
     int  *C_rs_recvcnts;            // Size task_k_num, output C matrix block reduce-scatter receive count array
@@ -44,6 +45,12 @@ struct ca3dmm_engine
     void *B_2dmm;                   // Size B_2dmm_nrow * B_2dmm_ncol, initial op(B) matrix block required in 2D matmul
     void *C_2dmm;                   // Size C_2dmm_nrow * C_2dmm_ncol, 2D matmul result C matrix block
     void *C_out;                    // Size C_out_nrow  * C_out_ncol,  output C matrix block
+    void *work_buf;                 // Work buffer, all void * above are alias to work_buf
+    size_t   rdA_workbuf_bytes;     // redist_A work buffer size in bytes
+    size_t   rdB_workbuf_bytes;     // redist_B work buffer size in bytes
+    size_t   rdC_workbuf_bytes;     // redist_C work buffer size in bytes
+    size_t   cannon_workbuf_bytes;  // cannon_engine work buffer size in bytes
+    size_t   self_workbuf_bytes;    // Self work buffer size in bytes
     MPI_Comm comm_AB_agv;           // Communicator for A or B matrix block MPI_Allgatherv
     MPI_Comm comm_C_rs;             // Communicator for C matrix reduce-scatter
     MPI_Comm comm_2dmm;             // Communicator for 2D matmul in each k_task
@@ -85,7 +92,10 @@ extern "C" {
 //                     If proc_grid == NULL, CA3DMM will find a process grid solution.
 //   comm            : MPI communicator of all MPI processes participating CA3DMM
 // Output parameter:
-//   *engine_ : Pointer to an initialized camm3d_engine structure
+//   *engine_       : Pointer to an initialized camm3d_engine structure
+//   *workbuf_bytes : Optional. If pointer is not NULL, the returning value is the size 
+//                    of work buffer, and ca3dmm_engine will not allocate work buffer.
+//                    If pointer is NULL, ca3dmm_engine will allocate and free work buffer.
 // Note: 
 //   (1) CA3DMM does not check the correctness of src_{A, B}_{s, n}{row, col} and dst_C_{s, n}{row, col}
 //   (2) If dst_C_{s, n}{row, col} are all -1, CA3DMM will not redistribute output C matrix
@@ -97,7 +107,8 @@ void ca3dmm_engine_init(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int *proc_grid, MPI_Comm comm, 
+    ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 );
 
 // Initialize a camm3d_engine structure for C := B^T * B
@@ -115,7 +126,10 @@ void ca3dmm_engine_init(
 //                If proc_grid == NULL, CA3DMM will find a process grid solution.
 //   comm       : MPI communicator of all MPI processes participating CA3DMM
 // Output parameter:
-//   *engine_ : Pointer to an initialized camm3d_engine structure
+//   *engine_       : Pointer to an initialized camm3d_engine structure
+//   *workbuf_bytes : Optional. If pointer is not NULL, the returning value is the size 
+//                    of work buffer, and ca3dmm_engine will not allocate work buffer.
+//                    If pointer is NULL, ca3dmm_engine will allocate and free work buffer.
 // Note: 
 //   (1) CA3DMM does not check the correctness of src_B_{s, n}{row, col} and dst_C_{s, n}{row, col}
 //   (2) If dst_C_{s, n}{row, col} are all -1, CA3DMM will not redistribute output C matrix
@@ -125,8 +139,16 @@ void ca3dmm_engine_init_BTB(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int *proc_grid, MPI_Comm comm, 
+    ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 );
+
+// Attach an external work buffer for camm3d_engine
+// Input parameters:
+//   engine   : Initialized camm3d_engine_p
+//   work_buf : Work buffer, size >= *workbuf_bytes returned by 
+//              ca3dmm_engine_init() or ca3dmm_engine_init_BTB()
+void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *work_buf);
 
 // Free a camm3d_engine structure
 void ca3dmm_engine_free(ca3dmm_engine_p *engine_);

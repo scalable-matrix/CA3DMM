@@ -45,7 +45,8 @@ void ca3dmm_engine_init(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int *proc_grid, MPI_Comm comm, 
+    ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 )
 {
     *engine_ = NULL;
@@ -173,10 +174,14 @@ void ca3dmm_engine_init(
         calc_block_spos_size(m, task_m_num, task_m_id, &task_m_spos, &task_m_size);
         calc_block_spos_size(n, task_n_num, task_n_id, &task_n_spos, &task_n_size);
         calc_block_spos_size(k, task_k_num, task_k_id, &task_k_spos, &task_k_size);
-        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine, NULL);
+        cannon_engine_init(
+            task_m_size, task_n_size, task_k_size, engine->comm_2dmm, 
+            &engine->cannon_engine, &engine->cannon_workbuf_bytes
+        );
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
         {
+            ERROR_PRINTF("Failed to initialize cannon_engine\n");
             ca3dmm_engine_free(&engine);
             return;
         }
@@ -310,15 +315,16 @@ void ca3dmm_engine_init(
     mat_redist_engine_init(
         src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
         A_rd_scol,  A_rd_srow,  A_rd_ncol,  A_rd_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_A, NULL
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_A, &engine->rdA_workbuf_bytes
     );
     mat_redist_engine_init(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         B_rd_scol,  B_rd_srow,  B_rd_ncol,  B_rd_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, NULL
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, &engine->rdB_workbuf_bytes
     );
     if ((engine->redist_A == NULL) || (engine->redist_B == NULL))
     {
+        ERROR_PRINTF("Failed to initialize redist_A and redist_B\n");
         ca3dmm_engine_free(&engine);
         return;
     }
@@ -329,46 +335,55 @@ void ca3dmm_engine_init(
         mat_redist_engine_init(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
-            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, NULL
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, &engine->rdC_workbuf_bytes
         );
         if (engine->redist_C == NULL)
         {
+            ERROR_PRINTF("Failed to initialize redist_C\n");
             ca3dmm_engine_free(&engine);
             return;
         }
     }
 
-    // 6. Allocate local matrix blocks
-    void *A_rd_recv = NULL, *A_2dmm = NULL, *A_trans = NULL;
-    void *B_rd_recv = NULL, *B_2dmm = NULL, *B_trans = NULL;
-    void *C_2dmm = NULL, *C_out = NULL;
+    // 6. Calculate local matrix block sizes
+    size_t self_workbuf_bytes = 0;
     if (engine->is_active)
     {
-        A_rd_recv = malloc(sizeof(double) * engine->A_rd_nrow   * engine->A_rd_ncol);
-        B_rd_recv = malloc(sizeof(double) * engine->B_rd_nrow   * engine->B_rd_ncol);
-        A_trans   = (trans_A == 1)   ? malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol) : A_rd_recv;
-        B_trans   = (trans_B == 1)   ? malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol) : B_rd_recv;
-        A_2dmm    = (task_n_num > 1) ? malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol) : A_trans;
-        B_2dmm    = (task_m_num > 1) ? malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol) : B_trans;
-        C_2dmm    = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
-        C_out     = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
-        if ((A_rd_recv == NULL) || (A_trans == NULL) || (A_2dmm == NULL) ||
-            (B_rd_recv == NULL) || (B_trans == NULL) || (B_2dmm == NULL) ||
-            (C_2dmm == NULL) || (C_out  == NULL))
+        self_workbuf_bytes += sizeof(double) * engine->A_rd_nrow * engine->A_rd_ncol;  // A_rd_recv
+        self_workbuf_bytes += sizeof(double) * engine->B_rd_nrow * engine->B_rd_ncol;  // B_rd_recv
+        if (trans_A == 1)   self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_trans
+        if (trans_B == 1)   self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_trans
+        if (task_n_num > 1) self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_2dmm
+        if (task_m_num > 1) self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_2dmm
+        self_workbuf_bytes += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+        self_workbuf_bytes += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+    }
+    engine->self_workbuf_bytes = self_workbuf_bytes;
+
+    // 7. Allocate and attach work buffer if needed
+    size_t max_child_workbuf_bytes = engine->rdA_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->rdB_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->rdB_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->rdC_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->rdC_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->cannon_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->cannon_workbuf_bytes;
+    size_t total_workbuf_bytes = max_child_workbuf_bytes + self_workbuf_bytes;
+    if (workbuf_bytes != NULL)
+    {
+        engine->alloc_workbuf = 0;
+        *workbuf_bytes = total_workbuf_bytes;
+    } else {
+        engine->alloc_workbuf = 1;
+        void *work_buf = malloc(total_workbuf_bytes);
+        if (work_buf == NULL)
         {
-            ERROR_PRINTF("Failed to allocate ca3dmm_engine matrix buffers\n");
+            ERROR_PRINTF("Failed to allocate ca3dmm_engine work buffer of %zu bytes\n", total_workbuf_bytes);
             ca3dmm_engine_free(&engine);
             return;
         }
+        ca3dmm_engine_attach_workbuf(engine, work_buf);
     }
-    engine->A_rd_recv = A_rd_recv;
-    engine->A_2dmm    = A_2dmm;
-    engine->A_trans   = A_trans;
-    engine->B_rd_recv = B_rd_recv;
-    engine->B_2dmm    = B_2dmm;
-    engine->B_trans   = B_trans;
-    engine->C_2dmm    = C_2dmm;
-    engine->C_out     = C_out;
 
     GET_ENV_INT_VAR(engine->print_timing, "CA3DMM_PRINT_TIMING", "engine->print_timing", 0, 0, 1);
     if (engine->my_rank > 0) engine->print_timing = 0;
@@ -386,7 +401,8 @@ void ca3dmm_engine_init_BTB(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int *proc_grid, MPI_Comm comm, 
+    ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 )
 {
     *engine_ = NULL;
@@ -491,7 +507,10 @@ void ca3dmm_engine_init_BTB(
         calc_block_spos_size(m, task_m_num, task_m_id, &task_m_spos, &task_m_size);
         calc_block_spos_size(n, task_n_num, task_n_id, &task_n_spos, &task_n_size);
         calc_block_spos_size(k, task_k_num, task_k_id, &task_k_spos, &task_k_size);
-        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine, NULL);
+        cannon_engine_init(
+            task_m_size, task_n_size, task_k_size, 
+            engine->comm_2dmm, &engine->cannon_engine, &engine->cannon_workbuf_bytes
+        );
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
         {
@@ -566,10 +585,11 @@ void ca3dmm_engine_init_BTB(
     mat_redist_engine_init(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         engine->B_2dmm_scol, engine->B_2dmm_srow, engine->B_2dmm_ncol, engine->B_2dmm_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, NULL
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, &engine->rdB_workbuf_bytes
     );
     if (engine->redist_B == NULL)
     {
+        ERROR_PRINTF("Failed to initialize redist_B\n");
         ca3dmm_engine_free(&engine);
         return;
     }
@@ -578,42 +598,52 @@ void ca3dmm_engine_init_BTB(
         mat_redist_engine_init(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
-            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, NULL
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, &engine->rdC_workbuf_bytes
         );
         if (engine->redist_C == NULL)
         {
+            ERROR_PRINTF("Failed to initialize redist_C\n");
             ca3dmm_engine_free(&engine);
             return;
         }
     }
 
-    // 6. Allocate local matrix blocks
-    void *A_rd_recv = NULL, *A_2dmm = NULL, *A_trans = NULL;
-    void *B_rd_recv = NULL, *B_2dmm = NULL, *B_trans = NULL;
-    void *C_2dmm = NULL, *C_out = NULL;
+    // 6. Calculate local matrix block sizes
+    size_t self_workbuf_bytes = 0;
     if (engine->is_active)
     {
-        A_2dmm  = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
-        A_trans = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
-        B_2dmm  = malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol);
-        C_2dmm  = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
-        C_out   = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
-        if ((A_2dmm == NULL) || (A_trans == NULL) || (B_2dmm == NULL) || 
-            (C_2dmm == NULL) || (C_out == NULL))
+        self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_2dmm
+        self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_trans   
+        self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_2dmm
+        self_workbuf_bytes += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;  // C_2dmm
+        self_workbuf_bytes += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;   // C_out
+    }
+    engine->self_workbuf_bytes = self_workbuf_bytes;
+
+    // 7. Allocate and attach work buffer if needed
+    size_t max_child_workbuf_bytes = engine->rdA_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->rdB_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->rdB_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->rdC_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->rdC_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->cannon_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->cannon_workbuf_bytes;
+    size_t total_workbuf_bytes = max_child_workbuf_bytes + self_workbuf_bytes;
+    if (workbuf_bytes != NULL)
+    {
+        engine->alloc_workbuf = 0;
+        *workbuf_bytes = total_workbuf_bytes;
+    } else {
+        engine->alloc_workbuf = 1;
+        void *work_buf = malloc(total_workbuf_bytes);
+        if (work_buf == NULL)
         {
-            ERROR_PRINTF("Failed to allocate ca3dmm_engine matrix buffers\n");
+            ERROR_PRINTF("Failed to allocate ca3dmm_engine work buffer of %zu bytes\n", total_workbuf_bytes);
             ca3dmm_engine_free(&engine);
             return;
         }
+        ca3dmm_engine_attach_workbuf(engine, work_buf);
     }
-    engine->A_rd_recv = A_rd_recv;
-    engine->A_2dmm    = A_2dmm;
-    engine->A_trans   = A_trans;
-    engine->B_rd_recv = A_rd_recv;
-    engine->B_2dmm    = B_2dmm;
-    engine->B_trans   = B_trans;
-    engine->C_2dmm    = C_2dmm;
-    engine->C_out     = C_out;
 
     GET_ENV_INT_VAR(engine->print_timing, "CA3DMM_PRINT_TIMING", "engine->print_timing", 0, 0, 1);
     if (engine->my_rank > 0) engine->print_timing = 0;
@@ -624,6 +654,97 @@ void ca3dmm_engine_init_BTB(
     *engine_ = engine;
 }
 
+// Attach an external work buffer for camm3d_engine
+void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *work_buf)
+{
+    size_t rdA_workbuf_bytes    = engine->rdA_workbuf_bytes;
+    size_t rdB_workbuf_bytes    = engine->rdB_workbuf_bytes;
+    size_t rdC_workbuf_bytes    = engine->rdC_workbuf_bytes;
+    size_t cannon_workbuf_bytes = engine->cannon_workbuf_bytes;
+
+    size_t max_child_workbuf_bytes = rdA_workbuf_bytes;
+    if (max_child_workbuf_bytes < rdB_workbuf_bytes) 
+        max_child_workbuf_bytes = rdB_workbuf_bytes;
+    if (max_child_workbuf_bytes < rdC_workbuf_bytes) 
+        max_child_workbuf_bytes = rdC_workbuf_bytes;
+    if (max_child_workbuf_bytes < cannon_workbuf_bytes) 
+        max_child_workbuf_bytes = cannon_workbuf_bytes;
+
+    char *child_work_buf = (char *) work_buf;
+    char *self_work_buf  = child_work_buf + max_child_workbuf_bytes;
+    engine->work_buf = work_buf;
+
+    if (engine->redist_A != NULL) mat_redist_engine_attach_workbuf(engine->redist_A, child_work_buf);
+    if (engine->redist_B != NULL) mat_redist_engine_attach_workbuf(engine->redist_B, child_work_buf);
+    if (engine->redist_C != NULL) mat_redist_engine_attach_workbuf(engine->redist_C, child_work_buf);
+    if (engine->cannon_engine != NULL) cannon_engine_attach_workbuf(engine->cannon_engine, child_work_buf);
+
+    if ((engine->is_BTB == 0) && (engine->is_active))
+    {
+        engine->A_rd_recv = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->A_rd_nrow * engine->A_rd_ncol;
+
+        engine->B_rd_recv = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->B_rd_nrow * engine->B_rd_ncol;
+
+        if (engine->trans_A)
+        {
+            engine->A_trans = (void *) self_work_buf;
+            self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+        } else {
+            engine->A_trans = engine->A_rd_recv;
+        }
+
+        if (engine->trans_B)
+        {
+            engine->B_trans = (void *) self_work_buf;
+            self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
+        } else {
+            engine->B_trans = engine->B_rd_recv;
+        }
+
+        if (engine->task_n_num > 1)
+        {
+            engine->A_2dmm = (void *) self_work_buf;
+            self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+        } else {
+            engine->A_2dmm = engine->A_trans;
+        }
+
+        if (engine->task_m_num > 1)
+        {
+            engine->B_2dmm = (void *) self_work_buf;
+            self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
+        } else {
+            engine->B_2dmm = engine->B_trans;
+        }
+
+        engine->C_2dmm = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+
+        engine->C_out = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+    } 
+
+    if ((engine->is_BTB == 1) && (engine->is_active)) 
+    {
+        engine->A_2dmm = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+
+        engine->A_trans = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+
+        engine->B_2dmm = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
+
+        engine->C_2dmm = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+
+        engine->C_out = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+    }
+}
+
 // Free a camm3d_engine structure
 void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
 {
@@ -632,14 +753,7 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
     free(engine->AB_agv_recvcnts);
     free(engine->AB_agv_displs);
     free(engine->C_rs_recvcnts);
-    free(engine->A_rd_recv);
-    free(engine->B_rd_recv);
-    if (engine->trans_A) free(engine->A_trans);
-    if (engine->trans_B) free(engine->B_trans);
-    if (engine->task_n_num > 1) free(engine->A_2dmm);
-    if (engine->task_m_num > 1) free(engine->B_2dmm);
-    free(engine->C_2dmm);
-    free(engine->C_out);
+    if (engine->alloc_workbuf) free(engine->work_buf);
     if (engine->is_BTB == 0) MPI_Comm_free(&engine->comm_AB_agv);
     MPI_Comm_free(&engine->comm_C_rs);
     MPI_Comm_free(&engine->comm_2dmm);

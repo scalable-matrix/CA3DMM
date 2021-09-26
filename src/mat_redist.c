@@ -49,6 +49,7 @@ void mat_redist_engine_init(
 )
 {
     mat_redist_engine_p engine = (mat_redist_engine_p) malloc(sizeof(mat_redist_engine_s));
+    memset(engine, 0, sizeof(mat_redist_engine_s));
 
     // Set up basic MPI and source block info
     int nproc, rank;
@@ -156,6 +157,12 @@ void mat_redist_engine_init(
     } else {
         engine->alloc_workbuf = 1;
         void *work_buf = malloc(workbuf_bytes_);
+        if (work_buf == NULL)
+        {
+            ERROR_PRINTF("Failed to allocate work buffer of size %zu bytes for mat_redist_engine\n", workbuf_bytes_);
+            mat_redist_engine_free(&engine);
+            return;
+        }
         mat_redist_engine_attach_workbuf(engine, work_buf);
     }
 
@@ -194,7 +201,6 @@ void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf
     // Assign work buffer
     engine->send_buf = (void *) work_buf;
     engine->recv_buf = (void *) ((char *) engine->send_buf + dt_size * send_cnt);
-
     engine->work_buf = work_buf;
 
     // Set up send blocks metadata
@@ -242,11 +248,14 @@ void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf
     engine->recv_info0 = NULL;
 
     // Build a new communicator with graph info
-    int reorder = 0;
-    MPI_Dist_graph_create_adjacent(
-        engine->input_comm, n_proc_recv, recv_ranks, MPI_UNWEIGHTED, n_proc_send, 
-        send_ranks, MPI_UNWEIGHTED, MPI_INFO_NULL, reorder, &engine->graph_comm
-    );
+    if (engine->work_buf != NULL)
+    {
+        int reorder = 0;
+        MPI_Dist_graph_create_adjacent(
+            engine->input_comm, n_proc_recv, recv_ranks, MPI_UNWEIGHTED, n_proc_send, 
+            send_ranks, MPI_UNWEIGHTED, MPI_INFO_NULL, reorder, &engine->graph_comm
+        );
+    }
 }
 
 // Destroy a mat_redist_engine_s
@@ -263,7 +272,7 @@ void mat_redist_engine_free(mat_redist_engine_p *engine_)
     free(engine->recv_sizes);
     free(engine->recv_displs);
     free(engine->rblk_sizes);
-    MPI_Comm_free(&engine->graph_comm);
+    if (engine->work_buf != NULL) MPI_Comm_free(&engine->graph_comm);
     free(engine);
     *engine_ = NULL;
 }
