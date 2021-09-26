@@ -31,7 +31,7 @@ struct cannon_engine
     void *B_recv;               // Size (k/np_dim + 1) * (n/np_dim + 1), B block receive buffer
     void *B_stack;              // Size (k/np_dim + 1) * (n/np_dim + 1) * gemm_cycle, stacked B blocks
     void *C_buff;               // Size (m/np_dim + 1) * (n/np_dim + 1), C block result buffer
-    void *work_buf;             // Work buffer, all arrays above are alias to work_buf
+    void *work_buf;             // Work buffer, all void * above are alias to work_buf
     MPI_Comm    comm;           // Target MPI communicator
     MPI_Request req_send_A[2];  // MPI requests for sending   A to   left  rank
     MPI_Request req_send_B[2];  // MPI requests for sending   B to   upper rank

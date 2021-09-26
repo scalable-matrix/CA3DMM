@@ -146,16 +146,8 @@ void mat_redist_engine_init(
     engine->recv_info0  = recv_info0;
 
     size_t workbuf_bytes_ = 0;
-    workbuf_bytes_ += sizeof(int) * n_proc_send;        // send_ranks
-    workbuf_bytes_ += sizeof(int) * n_proc_send;        // send_sizes
-    workbuf_bytes_ += sizeof(int) * (n_proc_send + 1);  // send_displs
-    workbuf_bytes_ += sizeof(int) * n_proc_send * 4;    // sblk_sizes
-    workbuf_bytes_ += sizeof(int) * n_proc_recv;        // recv_ranks
-    workbuf_bytes_ += sizeof(int) * n_proc_recv;        // recv_sizes
-    workbuf_bytes_ += sizeof(int) * (n_proc_recv + 1);  // recv_displs
-    workbuf_bytes_ += sizeof(int) * n_proc_recv * 4;    // rblk_sizes
-    workbuf_bytes_ += dt_size     * send_cnt;           // send_buf
-    workbuf_bytes_ += dt_size     * recv_cnt;           // recv_buf
+    workbuf_bytes_ += dt_size * send_cnt;  // send_buf
+    workbuf_bytes_ += dt_size * recv_cnt;  // recv_buf
 
     if (workbuf_bytes != NULL)
     {
@@ -188,21 +180,20 @@ void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf
     const int send_cnt    = engine->send_cnt;
     const int recv_cnt    = engine->recv_cnt;
 
-    // Assign work buffer
-    engine->send_ranks  = (int *) work_buf;
-    engine->send_sizes  = engine->send_ranks  + n_proc_send;
-    engine->send_displs = engine->send_sizes  + n_proc_send;
-    engine->sblk_sizes  = engine->send_displs + (n_proc_send + 1);
-    engine->recv_ranks  = engine->sblk_sizes  + n_proc_send * 4;
-    engine->recv_sizes  = engine->recv_ranks  + n_proc_recv;
-    engine->recv_displs = engine->recv_sizes  + n_proc_recv;
-    engine->rblk_sizes  = engine->recv_displs + (n_proc_recv + 1);
+    // No need to use external work buffer for integer arrays,
+    // these arrays should be accessed on host
+    engine->send_ranks  = (int *) malloc(sizeof(int) * n_proc_send);
+    engine->send_sizes  = (int *) malloc(sizeof(int) * n_proc_send);
+    engine->send_displs = (int *) malloc(sizeof(int) * (n_proc_send + 1));
+    engine->sblk_sizes  = (int *) malloc(sizeof(int) * n_proc_send * 4);
+    engine->recv_ranks  = (int *) malloc(sizeof(int) * n_proc_recv);
+    engine->recv_sizes  = (int *) malloc(sizeof(int) * n_proc_recv);
+    engine->recv_displs = (int *) malloc(sizeof(int) * (n_proc_recv + 1));
+    engine->rblk_sizes  = (int *) malloc(sizeof(int) * n_proc_recv * 4);
 
-    char *work_buf1  = (char *) (engine->rblk_sizes + n_proc_recv * 4);
-    engine->send_buf = (void *) work_buf1;
-    work_buf1 += dt_size * send_cnt;
-    engine->recv_buf = (void *) work_buf1;
-    work_buf1 += dt_size * recv_cnt;
+    // Assign work buffer
+    engine->send_buf = (void *) work_buf;
+    engine->recv_buf = (void *) ((char *) engine->send_buf + dt_size * send_cnt);
 
     engine->work_buf = work_buf;
 
@@ -264,6 +255,14 @@ void mat_redist_engine_free(mat_redist_engine_p *engine_)
     mat_redist_engine_p engine = *engine_;
     if (engine == NULL) return;
     if (engine->alloc_workbuf) free(engine->work_buf);
+    free(engine->send_ranks);
+    free(engine->send_sizes);
+    free(engine->send_displs);
+    free(engine->sblk_sizes);
+    free(engine->recv_ranks);
+    free(engine->recv_sizes);
+    free(engine->recv_displs);
+    free(engine->rblk_sizes);
     MPI_Comm_free(&engine->graph_comm);
     free(engine);
     *engine_ = NULL;

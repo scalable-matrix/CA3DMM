@@ -71,12 +71,11 @@ void cannon_engine_init(
     engine->max_C_blk_size = max_C_blk_size;
 
     size_t workbuf_bytes_ = 0;
-    workbuf_bytes_ += sizeof(double) * max_A_blk_size;    // A_gemm
-    workbuf_bytes_ += sizeof(double) * max_A_blk_size;    // A_recv
-    workbuf_bytes_ += sizeof(double) * max_B_blk_size;    // B_gemm
-    workbuf_bytes_ += sizeof(double) * max_B_blk_size;    // B_recv
-    workbuf_bytes_ += sizeof(double) * max_C_blk_size;    // C_buff
-    workbuf_bytes_ += sizeof(int)    * (np_dim + 1) * 3;  // {m, n, k}_displs
+    workbuf_bytes_ += sizeof(double) * max_A_blk_size;  // A_gemm
+    workbuf_bytes_ += sizeof(double) * max_A_blk_size;  // A_recv
+    workbuf_bytes_ += sizeof(double) * max_B_blk_size;  // B_gemm
+    workbuf_bytes_ += sizeof(double) * max_B_blk_size;  // B_recv
+    workbuf_bytes_ += sizeof(double) * max_C_blk_size;  // C_buff
 
     int  min_k_blk_size  = 140;
     int  curr_k_blk_size = engine->A_ncol;
@@ -122,7 +121,6 @@ void cannon_engine_attach_workbuf(cannon_engine_p engine, void *work_buf)
     const int max_C_blk_size = engine->max_C_blk_size;
     
     // Assign work buffer
-    int *work_buf_i;
     engine->A_gemm = work_buf;
     engine->A_recv = (void *) ((double *) engine->A_gemm + max_A_blk_size);
     engine->B_gemm = (void *) ((double *) engine->A_recv + max_A_blk_size);
@@ -132,16 +130,16 @@ void cannon_engine_attach_workbuf(cannon_engine_p engine, void *work_buf)
     {
         engine->A_stack = (void *) ((double *) engine->C_buff  + max_C_blk_size);
         engine->B_stack = (void *) ((double *) engine->A_stack + max_A_blk_size * gemm_cycle);
-        work_buf_i = (int *) ((double *) engine->B_stack + max_B_blk_size * gemm_cycle);
     } else {
         engine->A_stack = NULL;
         engine->B_stack = NULL;
-        work_buf_i = (int *) ((double *) engine->C_buff  + max_C_blk_size);
     }
 
-    engine->m_displs = work_buf_i;
-    engine->n_displs = engine->m_displs + (np_dim + 1);
-    engine->k_displs = engine->n_displs + (np_dim + 1);
+    // No need to use external work buffer for integer arrays,
+    // these arrays should be accessed on host
+    engine->m_displs = (int *) malloc(sizeof(int) * (np_dim + 1));
+    engine->n_displs = (int *) malloc(sizeof(int) * (np_dim + 1));
+    engine->k_displs = (int *) malloc(sizeof(int) * (np_dim + 1));
     int dummy;
     for (int i = 0; i <= np_dim; i++)
     {
@@ -175,6 +173,9 @@ void cannon_engine_free(cannon_engine_p *engine_)
     cannon_engine_p engine = *engine_;
     if (engine == NULL) return;
     if (engine->alloc_workbuf) free(engine->work_buf);
+    free(engine->m_displs);
+    free(engine->n_displs);
+    free(engine->k_displs);
     MPI_Comm_free(&engine->comm);
     for (int i = 0; i < 2; i++)
     {

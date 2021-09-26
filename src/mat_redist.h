@@ -34,7 +34,7 @@ struct mat_redist_engine
     int     *recv_info0;    // Temporary work array for determining send and receive pairs
     void    *send_buf;      // Send buffer
     void    *recv_buf;      // Receive buffer
-    void    *work_buf;      // Work buffer, all arrays above are alias to work_buf
+    void    *work_buf;      // Work buffer, all void * above are alias to work_buf
 };
 typedef struct mat_redist_engine  mat_redist_engine_s;
 typedef struct mat_redist_engine* mat_redist_engine_p;
