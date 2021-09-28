@@ -6,6 +6,7 @@
 #include <mpi.h>
 
 #include "partition.h"
+#include "utils.h"
 #include "cannon.h"
 #include "ca3dmm.h"
 #include "mat_redist.h"
@@ -22,7 +23,8 @@ static inline void transpose_cm_mat(
     double *A_trans, const int ldAT
 )
 {
-    // TODO: use multithreading if necessary
+    // TODO: use blocking
+    #pragma omp parallel for
     for (int j = 0; j < A_ncol; j++)
     {
         for (int i = 0; i < A_nrow; i++)
@@ -43,7 +45,8 @@ void ca3dmm_engine_init(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int *proc_grid, MPI_Comm comm, 
+    ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 )
 {
     *engine_ = NULL;
@@ -70,7 +73,8 @@ void ca3dmm_engine_init(
         int min_mp_np = (mp < np) ? mp : np;
         if ((max_mp_np % min_mp_np) || (rp < 0))
         {
-            if (engine->my_rank == 0) printf("[WARNING] Invalid process grid specified: mp, np, kp = %d, %d, %d\n", mp, np, kp);
+            if (engine->my_rank == 0) 
+                WARNING_PRINTF("Invalid process grid specified: mp, np, kp = %d, %d, %d\n", mp, np, kp);
         } else {
             gen_proc_grid = 0;
         }
@@ -78,11 +82,8 @@ void ca3dmm_engine_init(
     if (gen_proc_grid) calc_3d_decomposition(p, m, n, k, &mp, &np, &kp, &rp);
     if ((mp < 1) || (np < 1) || (kp < 1) || (mp * np * kp > p))
     {
-        if (engine->my_rank == 0) 
-        {
-            fprintf(stderr, "[ERROR] Invalid process grid generated: p = %d, mp, np, kp = %d, %d, %d\n", p, mp, np, kp);
-            fflush(stderr);
-        }
+        if (engine->my_rank == 0)
+            ERROR_PRINTF("Invalid process grid generated: p = %d, mp, np, kp = %d, %d, %d\n", p, mp, np, kp);
         ca3dmm_engine_free(&engine);
         return;
     }
@@ -170,13 +171,17 @@ void ca3dmm_engine_init(
         int task_m_spos, task_m_size;
         int task_n_spos, task_n_size;
         int task_k_spos, task_k_size;
-        calc_block_size_pos(m, task_m_num, task_m_id, &task_m_size, &task_m_spos);
-        calc_block_size_pos(n, task_n_num, task_n_id, &task_n_size, &task_n_spos);
-        calc_block_size_pos(k, task_k_num, task_k_id, &task_k_size, &task_k_spos);
-        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine);
+        calc_block_spos_size(m, task_m_num, task_m_id, &task_m_spos, &task_m_size);
+        calc_block_spos_size(n, task_n_num, task_n_id, &task_n_spos, &task_n_size);
+        calc_block_spos_size(k, task_k_num, task_k_id, &task_k_spos, &task_k_size);
+        cannon_engine_init(
+            task_m_size, task_n_size, task_k_size, engine->comm_2dmm, 
+            &engine->cannon_engine, &engine->cannon_workbuf_bytes
+        );
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
         {
+            ERROR_PRINTF("Failed to initialize cannon_engine\n");
             ca3dmm_engine_free(&engine);
             return;
         }
@@ -198,7 +203,7 @@ void ca3dmm_engine_init(
         int *C_rs_recvcnts = (int *) malloc(sizeof(int) * task_k_num);
         for (int i = 0; i < task_k_num; i++)
         {
-            calc_block_size_pos(engine->C_2dmm_ncol, task_k_num, i, &C_out_ncol, &C_out_scol);
+            calc_block_spos_size(engine->C_2dmm_ncol, task_k_num, i, &C_out_scol, &C_out_ncol);
             if (C_out_ncol0 == -1) C_out_ncol0 = C_out_ncol;
             if (C_out_ncol0 != C_out_ncol) use_rsb = 0;
             C_rs_recvcnts[i] = C_out_ncol * engine->C_2dmm_nrow;
@@ -254,7 +259,7 @@ void ca3dmm_engine_init(
         int scol, ncol, use_ag = 1, ncol0 = -1;
         for (int i = 0; i < task_n_num; i++)
         {
-            calc_block_size_pos(engine->A_2dmm_ncol, task_n_num, i, &ncol, &scol);
+            calc_block_spos_size(engine->A_2dmm_ncol, task_n_num, i, &scol, &ncol);
             if (ncol0 == -1) ncol0 = ncol;
             if (ncol0 != ncol) use_ag = 0;
             AB_agv_recvcnts[i] = ncol * engine->A_2dmm_nrow;
@@ -272,7 +277,7 @@ void ca3dmm_engine_init(
         int scol, ncol, use_ag = 1, ncol0 = -1;
         for (int i = 0; i < task_m_num; i++)
         {
-            calc_block_size_pos(engine->B_2dmm_ncol, task_m_num, i, &ncol, &scol);
+            calc_block_spos_size(engine->B_2dmm_ncol, task_m_num, i, &scol, &ncol);
             if (ncol0 == -1) ncol0 = ncol;
             if (ncol0 != ncol) use_ag = 0;
             AB_agv_recvcnts[i] = ncol * engine->B_2dmm_nrow;
@@ -310,15 +315,16 @@ void ca3dmm_engine_init(
     mat_redist_engine_init(
         src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
         A_rd_scol,  A_rd_srow,  A_rd_ncol,  A_rd_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_A
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_A, &engine->rdA_workbuf_bytes
     );
     mat_redist_engine_init(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         B_rd_scol,  B_rd_srow,  B_rd_ncol,  B_rd_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, &engine->rdB_workbuf_bytes
     );
     if ((engine->redist_A == NULL) || (engine->redist_B == NULL))
     {
+        ERROR_PRINTF("Failed to initialize redist_A and redist_B\n");
         ca3dmm_engine_free(&engine);
         return;
     }
@@ -329,52 +335,58 @@ void ca3dmm_engine_init(
         mat_redist_engine_init(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
-            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, &engine->rdC_workbuf_bytes
         );
         if (engine->redist_C == NULL)
         {
+            ERROR_PRINTF("Failed to initialize redist_C\n");
             ca3dmm_engine_free(&engine);
             return;
         }
     }
 
-    // 6. Allocate local matrix blocks
-    void *A_rd_recv = NULL, *A_2dmm = NULL, *A_trans = NULL;
-    void *B_rd_recv = NULL, *B_2dmm = NULL, *B_trans = NULL;
-    void *C_2dmm = NULL, *C_out = NULL;
+    // 6. Calculate local matrix block sizes
+    size_t self_workbuf_bytes = 0;
     if (engine->is_active)
     {
-        A_rd_recv = malloc(sizeof(double) * engine->A_rd_nrow   * engine->A_rd_ncol);
-        B_rd_recv = malloc(sizeof(double) * engine->B_rd_nrow   * engine->B_rd_ncol);
-        A_trans   = (trans_A == 1)   ? malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol) : A_rd_recv;
-        B_trans   = (trans_B == 1)   ? malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol) : B_rd_recv;
-        A_2dmm    = (task_n_num > 1) ? malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol) : A_trans;
-        B_2dmm    = (task_m_num > 1) ? malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol) : B_trans;
-        C_2dmm    = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
-        C_out     = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
-        if ((A_rd_recv == NULL) || (A_trans == NULL) || (A_2dmm == NULL) ||
-            (B_rd_recv == NULL) || (B_trans == NULL) || (B_2dmm == NULL) ||
-            (C_2dmm == NULL) || (C_out  == NULL))
+        self_workbuf_bytes += sizeof(double) * engine->A_rd_nrow * engine->A_rd_ncol;  // A_rd_recv
+        self_workbuf_bytes += sizeof(double) * engine->B_rd_nrow * engine->B_rd_ncol;  // B_rd_recv
+        if (trans_A == 1)   self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_trans
+        if (trans_B == 1)   self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_trans
+        if (task_n_num > 1) self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_2dmm
+        if (task_m_num > 1) self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_2dmm
+        self_workbuf_bytes += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+        self_workbuf_bytes += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+    }
+    engine->self_workbuf_bytes = self_workbuf_bytes;
+
+    // 7. Allocate and attach work buffer if needed
+    size_t max_child_workbuf_bytes = engine->rdA_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->rdB_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->rdB_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->rdC_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->rdC_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->cannon_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->cannon_workbuf_bytes;
+    size_t total_workbuf_bytes = max_child_workbuf_bytes + self_workbuf_bytes;
+    if (workbuf_bytes != NULL)
+    {
+        engine->alloc_workbuf = 0;
+        *workbuf_bytes = total_workbuf_bytes;
+    } else {
+        engine->alloc_workbuf = 1;
+        void *work_buf = malloc(total_workbuf_bytes);
+        if (work_buf == NULL)
         {
-            fprintf(stderr, "[ERROR] Failed to allocate ca3dmm_engine matrix buffers\n");
+            ERROR_PRINTF("Failed to allocate ca3dmm_engine work buffer of %zu bytes\n", total_workbuf_bytes);
             ca3dmm_engine_free(&engine);
             return;
         }
+        ca3dmm_engine_attach_workbuf(engine, work_buf);
     }
-    engine->A_rd_recv = A_rd_recv;
-    engine->A_2dmm    = A_2dmm;
-    engine->A_trans   = A_trans;
-    engine->B_rd_recv = B_rd_recv;
-    engine->B_2dmm    = B_2dmm;
-    engine->B_trans   = B_trans;
-    engine->C_2dmm    = C_2dmm;
-    engine->C_out     = C_out;
 
-    char *print_timing_p = getenv("CA3DMM_PRINT_TIMING");
-    int print_timing;
-    if (print_timing_p != NULL) print_timing = atoi(print_timing_p);
-    if (engine->my_rank == 0 && print_timing == 1) engine->print_timing = 1;
-    else engine->print_timing = 0;
+    GET_ENV_INT_VAR(engine->print_timing, "CA3DMM_PRINT_TIMING", "engine->print_timing", 0, 0, 1);
+    if (engine->my_rank > 0) engine->print_timing = 0;
 
     double stop_t = MPI_Wtime();
     engine->init_ms = 1000.0 * (stop_t - start_t);
@@ -389,7 +401,8 @@ void ca3dmm_engine_init_BTB(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, ca3dmm_engine_p *engine_
+    const int *proc_grid, MPI_Comm comm, 
+    ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 )
 {
     *engine_ = NULL;
@@ -415,7 +428,8 @@ void ca3dmm_engine_init_BTB(
         rp = engine->n_proc - mp * np * kp;
         if ((mp != np) || (rp < 0))
         {
-            if (engine->my_rank == 0) printf("[WARNING] Invalid process grid specified: mp, np, kp = %d, %d, %d\n", mp, np, kp);
+            if (engine->my_rank == 0) 
+                WARNING_PRINTF("Invalid process grid specified: mp, np, kp = %d, %d, %d\n", mp, np, kp);
         } else {
             gen_proc_grid = 0;
         }
@@ -424,11 +438,8 @@ void ca3dmm_engine_init_BTB(
     mp = np;
     if ((mp < 1) || (np < 1) || (kp < 1) || (mp * np * kp > p))
     {
-        if (engine->my_rank == 0) 
-        {
-            fprintf(stderr, "3D decomposition function error: p = %d, mp, np, kp = %d, %d, %d\n", p, mp, np, kp);
-            fflush(stderr);
-        }
+        if (engine->my_rank == 0)
+            ERROR_PRINTF("3D decomposition function error: p = %d, mp, np, kp = %d, %d, %d\n", p, mp, np, kp);
         ca3dmm_engine_free(&engine);
         return;
     }
@@ -493,10 +504,13 @@ void ca3dmm_engine_init_BTB(
         int task_m_spos, task_m_size;
         int task_n_spos, task_n_size;
         int task_k_spos, task_k_size;
-        calc_block_size_pos(m, task_m_num, task_m_id, &task_m_size, &task_m_spos);
-        calc_block_size_pos(n, task_n_num, task_n_id, &task_n_size, &task_n_spos);
-        calc_block_size_pos(k, task_k_num, task_k_id, &task_k_size, &task_k_spos);
-        cannon_engine_init(task_m_size, task_n_size, task_k_size, engine->comm_2dmm, &engine->cannon_engine);
+        calc_block_spos_size(m, task_m_num, task_m_id, &task_m_spos, &task_m_size);
+        calc_block_spos_size(n, task_n_num, task_n_id, &task_n_spos, &task_n_size);
+        calc_block_spos_size(k, task_k_num, task_k_id, &task_k_spos, &task_k_size);
+        cannon_engine_init(
+            task_m_size, task_n_size, task_k_size, 
+            engine->comm_2dmm, &engine->cannon_engine, &engine->cannon_workbuf_bytes
+        );
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
         {
@@ -521,7 +535,7 @@ void ca3dmm_engine_init_BTB(
         int *C_rs_recvcnts = (int *) malloc(sizeof(int) * task_k_num);
         for (int i = 0; i < task_k_num; i++)
         {
-            calc_block_size_pos(engine->C_2dmm_ncol, task_k_num, i, &C_out_ncol, &C_out_scol);
+            calc_block_spos_size(engine->C_2dmm_ncol, task_k_num, i, &C_out_scol, &C_out_ncol);
             if (C_out_ncol0 == -1) C_out_ncol0 = C_out_ncol;
             if (C_out_ncol0 != C_out_ncol) use_rsb = 0;
             C_rs_recvcnts[i] = C_out_ncol * engine->C_2dmm_nrow;
@@ -571,10 +585,11 @@ void ca3dmm_engine_init_BTB(
     mat_redist_engine_init(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         engine->B_2dmm_scol, engine->B_2dmm_srow, engine->B_2dmm_ncol, engine->B_2dmm_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B
+        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, &engine->rdB_workbuf_bytes
     );
     if (engine->redist_B == NULL)
     {
+        ERROR_PRINTF("Failed to initialize redist_B\n");
         ca3dmm_engine_free(&engine);
         return;
     }
@@ -583,53 +598,151 @@ void ca3dmm_engine_init_BTB(
         mat_redist_engine_init(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
-            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C
+            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, &engine->rdC_workbuf_bytes
         );
         if (engine->redist_C == NULL)
         {
+            ERROR_PRINTF("Failed to initialize redist_C\n");
             ca3dmm_engine_free(&engine);
             return;
         }
     }
 
-    // 6. Allocate local matrix blocks
-    void *A_rd_recv = NULL, *A_2dmm = NULL, *A_trans = NULL;
-    void *B_rd_recv = NULL, *B_2dmm = NULL, *B_trans = NULL;
-    void *C_2dmm = NULL, *C_out = NULL;
+    // 6. Calculate local matrix block sizes
+    size_t self_workbuf_bytes = 0;
     if (engine->is_active)
     {
-        A_2dmm  = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
-        A_trans = malloc(sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol);
-        B_2dmm  = malloc(sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol);
-        C_2dmm  = malloc(sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol);
-        C_out   = malloc(sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol);
-        if ((A_2dmm == NULL) || (A_trans == NULL) || (B_2dmm == NULL) || 
-            (C_2dmm == NULL) || (C_out == NULL))
+        self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_2dmm
+        self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_trans   
+        self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_2dmm
+        self_workbuf_bytes += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;  // C_2dmm
+        self_workbuf_bytes += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;   // C_out
+    }
+    engine->self_workbuf_bytes = self_workbuf_bytes;
+
+    // 7. Allocate and attach work buffer if needed
+    size_t max_child_workbuf_bytes = engine->rdA_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->rdB_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->rdB_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->rdC_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->rdC_workbuf_bytes;
+    if (max_child_workbuf_bytes < engine->cannon_workbuf_bytes) 
+        max_child_workbuf_bytes = engine->cannon_workbuf_bytes;
+    size_t total_workbuf_bytes = max_child_workbuf_bytes + self_workbuf_bytes;
+    if (workbuf_bytes != NULL)
+    {
+        engine->alloc_workbuf = 0;
+        *workbuf_bytes = total_workbuf_bytes;
+    } else {
+        engine->alloc_workbuf = 1;
+        void *work_buf = malloc(total_workbuf_bytes);
+        if (work_buf == NULL)
         {
-            fprintf(stderr, "[ERROR] Failed to allocate ca3dmm_engine matrix buffers\n");
+            ERROR_PRINTF("Failed to allocate ca3dmm_engine work buffer of %zu bytes\n", total_workbuf_bytes);
             ca3dmm_engine_free(&engine);
             return;
         }
+        ca3dmm_engine_attach_workbuf(engine, work_buf);
     }
-    engine->A_rd_recv = A_rd_recv;
-    engine->A_2dmm    = A_2dmm;
-    engine->A_trans   = A_trans;
-    engine->B_rd_recv = A_rd_recv;
-    engine->B_2dmm    = B_2dmm;
-    engine->B_trans   = B_trans;
-    engine->C_2dmm    = C_2dmm;
-    engine->C_out     = C_out;
 
-    char *print_timing_p = getenv("CA3DMM_PRINT_TIMING");
-    int print_timing;
-    if (print_timing_p != NULL) print_timing = atoi(print_timing_p);
-    if (engine->my_rank == 0 && print_timing == 1) engine->print_timing = 1;
-    else engine->print_timing = 0;
+    GET_ENV_INT_VAR(engine->print_timing, "CA3DMM_PRINT_TIMING", "engine->print_timing", 0, 0, 1);
+    if (engine->my_rank > 0) engine->print_timing = 0;
 
     double stop_t = MPI_Wtime();
     engine->init_ms = 1000.0 * (stop_t - start_t);
 
     *engine_ = engine;
+}
+
+// Attach an external work buffer for camm3d_engine
+void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *work_buf)
+{
+    size_t rdA_workbuf_bytes    = engine->rdA_workbuf_bytes;
+    size_t rdB_workbuf_bytes    = engine->rdB_workbuf_bytes;
+    size_t rdC_workbuf_bytes    = engine->rdC_workbuf_bytes;
+    size_t cannon_workbuf_bytes = engine->cannon_workbuf_bytes;
+
+    size_t max_child_workbuf_bytes = rdA_workbuf_bytes;
+    if (max_child_workbuf_bytes < rdB_workbuf_bytes) 
+        max_child_workbuf_bytes = rdB_workbuf_bytes;
+    if (max_child_workbuf_bytes < rdC_workbuf_bytes) 
+        max_child_workbuf_bytes = rdC_workbuf_bytes;
+    if (max_child_workbuf_bytes < cannon_workbuf_bytes) 
+        max_child_workbuf_bytes = cannon_workbuf_bytes;
+
+    char *child_work_buf = (char *) work_buf;
+    char *self_work_buf  = child_work_buf + max_child_workbuf_bytes;
+    engine->work_buf = work_buf;
+
+    if (engine->redist_A != NULL) mat_redist_engine_attach_workbuf(engine->redist_A, child_work_buf);
+    if (engine->redist_B != NULL) mat_redist_engine_attach_workbuf(engine->redist_B, child_work_buf);
+    if (engine->redist_C != NULL) mat_redist_engine_attach_workbuf(engine->redist_C, child_work_buf);
+    if (engine->cannon_engine != NULL) cannon_engine_attach_workbuf(engine->cannon_engine, child_work_buf);
+
+    if ((engine->is_BTB == 0) && (engine->is_active))
+    {
+        engine->A_rd_recv = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->A_rd_nrow * engine->A_rd_ncol;
+
+        engine->B_rd_recv = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->B_rd_nrow * engine->B_rd_ncol;
+
+        if (engine->trans_A)
+        {
+            engine->A_trans = (void *) self_work_buf;
+            self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+        } else {
+            engine->A_trans = engine->A_rd_recv;
+        }
+
+        if (engine->trans_B)
+        {
+            engine->B_trans = (void *) self_work_buf;
+            self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
+        } else {
+            engine->B_trans = engine->B_rd_recv;
+        }
+
+        if (engine->task_n_num > 1)
+        {
+            engine->A_2dmm = (void *) self_work_buf;
+            self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+        } else {
+            engine->A_2dmm = engine->A_trans;
+        }
+
+        if (engine->task_m_num > 1)
+        {
+            engine->B_2dmm = (void *) self_work_buf;
+            self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
+        } else {
+            engine->B_2dmm = engine->B_trans;
+        }
+
+        engine->C_2dmm = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+
+        engine->C_out = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+    } 
+
+    if ((engine->is_BTB == 1) && (engine->is_active)) 
+    {
+        engine->A_2dmm = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+
+        engine->A_trans = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+
+        engine->B_2dmm = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
+
+        engine->C_2dmm = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+
+        engine->C_out = (void *) self_work_buf;
+        self_work_buf += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+    }
 }
 
 // Free a camm3d_engine structure
@@ -640,14 +753,7 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
     free(engine->AB_agv_recvcnts);
     free(engine->AB_agv_displs);
     free(engine->C_rs_recvcnts);
-    free(engine->A_rd_recv);
-    free(engine->B_rd_recv);
-    if (engine->trans_A) free(engine->A_trans);
-    if (engine->trans_B) free(engine->B_trans);
-    if (engine->task_n_num > 1) free(engine->A_2dmm);
-    if (engine->task_m_num > 1) free(engine->B_2dmm);
-    free(engine->C_2dmm);
-    free(engine->C_out);
+    if (engine->alloc_workbuf) free(engine->work_buf);
     if (engine->is_BTB == 0) MPI_Comm_free(&engine->comm_AB_agv);
     MPI_Comm_free(&engine->comm_C_rs);
     MPI_Comm_free(&engine->comm_2dmm);
@@ -669,7 +775,7 @@ void ca3dmm_engine_exec(
 {
     if (engine == NULL)
     {
-        fprintf(stderr, "[ERROR] ca3dmm_engine not initialized\n");
+        ERROR_PRINTF("ca3dmm_engine not initialized\n");
         return;
     }
 
@@ -717,7 +823,7 @@ void ca3dmm_engine_exec(
         stop_t = MPI_Wtime();
         redist_ms = 1000.0 * (stop_t - start_t);
         engine->redist_ms += redist_ms;
-        if (engine->print_timing) printf("[INFO] Redistribute A & B time = %.2f ms\n", redist_ms);
+        if (engine->print_timing) INFO_PRINTF("Redistribute A & B time = %.2f ms\n", redist_ms);
 
         // Local transpose the received A & B blocks before MPI_allgatherv and Cannon2D.
         // Cannon 2D calls DGEMM with the parameters of no-transpose for both A & B block, 
@@ -784,14 +890,14 @@ void ca3dmm_engine_exec(
         stop_t = MPI_Wtime();
         agvAB_ms = 1000.0 * (stop_t - start_t);
         engine->agvAB_ms += agvAB_ms;
-        if (engine->print_timing) printf("[INFO] Allgather A or B time   = %.2f ms\n", agvAB_ms);
+        if (engine->print_timing) INFO_PRINTF("Allgather A or B time   = %.2f ms\n", agvAB_ms);
     } else {
         start_t = MPI_Wtime();
         mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_2dmm, B_2dmm_nrow);
         stop_t = MPI_Wtime();
         redist_ms = 1000.0 * (stop_t - start_t);
         engine->redist_ms += redist_ms;
-        if (engine->print_timing) printf("[INFO] Redistribute A & B time = %.2f ms\n", redist_ms);
+        if (engine->print_timing) INFO_PRINTF("Redistribute A & B time = %.2f ms\n", redist_ms);
 
         // In each Cannon task group, block Bij hold by process Pij == the transpose of 
         // block Aji required by process Pji. Since Cannon 2D calls DGEMM with the 
@@ -819,7 +925,7 @@ void ca3dmm_engine_exec(
         stop_t = MPI_Wtime();
         agvAB_ms = 1000.0 * (stop_t - start_t);
         engine->agvAB_ms += agvAB_ms;
-        if (engine->print_timing) printf("[INFO] Allgather A or B time   = %.2f ms\n", agvAB_ms);
+        if (engine->print_timing) INFO_PRINTF("Allgather A or B time   = %.2f ms\n", agvAB_ms);
     }  // End of "if (engine->is_BTB == 0)"
 
     if (engine->is_active == 1)
@@ -830,7 +936,7 @@ void ca3dmm_engine_exec(
         stop_t = MPI_Wtime();
         cannon_ms = 1000.0 * (stop_t - start_t);
         engine->cannon_ms += cannon_ms;
-        if (engine->print_timing) printf("[INFO] 2D Cannon time          = %.2f ms\n", cannon_ms);
+        if (engine->print_timing) INFO_PRINTF("2D Cannon time          = %.2f ms\n", cannon_ms);
 
         start_t = MPI_Wtime();
         if (engine->task_k_num > 1)
@@ -853,8 +959,8 @@ void ca3dmm_engine_exec(
         engine->reduce_ms += reduce_ms;
         if (engine->print_timing)
         {
-            printf("[INFO] Reduce-scatter C time   = %.2f ms\n", reduce_ms);
-            printf("[INFO] CA3DMM matmul time      = %.2f ms\n", agvAB_ms + cannon_ms + reduce_ms);
+            INFO_PRINTF("Reduce-scatter C time   = %.2f ms\n", reduce_ms);
+            INFO_PRINTF("CA3DMM matmul time      = %.2f ms\n", agvAB_ms + cannon_ms + reduce_ms);
         }
     }
 
@@ -864,13 +970,13 @@ void ca3dmm_engine_exec(
     stop_t = MPI_Wtime();
     redist_ms = 1000.0 * (stop_t - start_t);
     engine->redist_ms += redist_ms;
-    if (engine->print_timing) printf("[INFO] Redistribute C time     = %.2f ms\n", redist_ms);
+    if (engine->print_timing) INFO_PRINTF("Redistribute C time     = %.2f ms\n", redist_ms);
 
     // No need to add a global barrier here since mat_redist_engine_exec() already has one
     exec_stop_t = MPI_Wtime();
     exec_ms = 1000.0 * (exec_stop_t - exec_start_t);
     engine->exec_ms += exec_ms;
-    if (engine->print_timing) printf("[INFO] CA3DMM exec time        = %.2f ms\n\n", exec_ms);
+    if (engine->print_timing) INFO_PRINTF("CA3DMM exec time        = %.2f ms\n\n", exec_ms);
     engine->n_exec++;
 }
 
@@ -894,7 +1000,7 @@ void ca3dmm_engine_print_stat(ca3dmm_engine_p engine)
     if (engine == NULL) return;
     if (engine->n_exec == 0)
     {
-        printf("No ca3dmm_engine statistic data to print\n");
+        WARNING_PRINTF("No ca3dmm_engine statistic data to print\n");
         return;
     }
     printf("================== CA3DMM algorithm engine =================\n");

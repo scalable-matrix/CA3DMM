@@ -8,6 +8,7 @@
 
 #include "ca3dmm.h"
 #include "example_utils.h"
+#include "utils.h"  // in CA3DMM's include/
 
 int main(int argc, char **argv)
 {
@@ -20,7 +21,7 @@ int main(int argc, char **argv)
 
     if ((argc == 2) && ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)))
     {
-        printf("Usage: %s m n k transA(0 or 1) transB(0 or 1) check_correct(0 or 1) n_test\n", argv[0]);
+        printf("Usage: %s m n k check_correct(0 or 1) n_test\n", argv[0]);
         MPI_Finalize();
         return 0;
     }
@@ -28,10 +29,8 @@ int main(int argc, char **argv)
     int m = get_int_param(argc, argv, 1, 4096, 1, 8388608);
     int n = get_int_param(argc, argv, 2, 4096, 1, 8388608);
     int k = get_int_param(argc, argv, 3, 4096, 1, 8388608);
-    int trans_A = get_int_param(argc, argv, 4, 0, 0, 1);
-    int trans_B = get_int_param(argc, argv, 5, 0, 0, 1);
-    int chk_res = get_int_param(argc, argv, 6, 1, 0, 1);
-    int n_test  = get_int_param(argc, argv, 7, 10, 1, 100);
+    int chk_res = get_int_param(argc, argv, 4, 1, 0, 1);
+    int n_test  = get_int_param(argc, argv, 5, 10, 1, 100);
 
     if (m != n)
     {
@@ -43,7 +42,6 @@ int main(int argc, char **argv)
     if (my_rank == 0)
     {
         printf("Test problem size m * n * k : %d * %d * %d\n", m, n, k);
-        printf("Transpose A / B             : %d / %d\n", trans_A, trans_B);
         printf("Number of tests             : %d\n", n_test);
         printf("Check result correctness    : %d\n", chk_res);
         printf("\n");
@@ -60,8 +58,8 @@ int main(int argc, char **argv)
     B_in_nrow  = B_nrow;
     C_out_srow = 0;
     C_out_nrow = C_nrow;
-    calc_block_size_pos(B_ncol, n_proc, my_rank, &B_in_ncol,  &B_in_scol);
-    calc_block_size_pos(C_ncol, n_proc, my_rank, &C_out_ncol, &C_out_scol);
+    calc_block_spos_size(B_ncol, n_proc, my_rank,  &B_in_scol, &B_in_ncol);
+    calc_block_spos_size(C_ncol, n_proc, my_rank, &C_out_scol, &C_out_ncol);
     size_t B_in_msize  = sizeof(double) * (size_t) B_in_nrow  * (size_t) B_in_ncol;
     size_t C_out_msize = sizeof(double) * (size_t) C_out_nrow * (size_t) C_out_ncol;
     double *B_in  = (double *) malloc(B_in_msize);
@@ -83,7 +81,7 @@ int main(int argc, char **argv)
     ca3dmm_engine_init_BTB(
         n, k, B_in_srow, B_in_nrow, B_in_scol, B_in_ncol,
         C_out_srow, C_out_nrow, C_out_scol, C_out_ncol,
-        NULL, MPI_COMM_WORLD, &ce
+        NULL, MPI_COMM_WORLD, &ce, NULL
     );
     if (ce->my_rank == 0)
     {
