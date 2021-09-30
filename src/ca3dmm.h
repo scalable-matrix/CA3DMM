@@ -155,13 +155,13 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_);
 
 // Perform Communication-Avoiding 3D Matrix Multiplication (CA3DMM)
 // Input parameters:
+//   engine      : An initialize camm3d_engine structure
 //   src_{A, B}  : Size unknown, input A/B matrix block (col-major) on this MPI process
 //   ld{A, B, C} : Leading dimension of src_{A, B} and dst_C
 //                 If A/B is not transposed, ldA >= m and ldB >= k. 
 //                 If A/B is     transposed, ldA >= k and ldB >= n.
 //                 If C block is specified in ca3dmm_engine_{init, init_BTB}(), ldC >= dst_C_nrow.
 //                 If C block is not specified in ca3dmm_engine_{init, init_BTB}(), ldC will be ignored.
-//   engine      : An initialize camm3d_engine structure
 // Output parameters:
 //   dst_C       : If C block is specified in ca3dmm_engine_{init, init_BTB}(), dst_C is a 
 //                 pointer to a buffer of size >= ldC * dst_C_ncol for storing the required C block.
@@ -173,10 +173,10 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_);
 //   C_out_scol  : First column      of output C matrix on this MPI process
 //   C_out_ncol  : Number of columns of output C matrix on this MPI process
 void ca3dmm_engine_exec(
+    ca3dmm_engine_p engine,
     const void *src_A, const int ldA,
     const void *src_B, const int ldB,
-    void *dst_C, const int ldC, 
-    ca3dmm_engine_p engine
+    void *dst_C, const int ldC
 );
 
 // Reset statistic data of a ca3dmm_engine (not a collective call)

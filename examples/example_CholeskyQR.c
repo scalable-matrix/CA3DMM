@@ -99,7 +99,7 @@ int main(int argc, char **argv)
         S0_srow, S0_nrow, S0_scol, S0_ncol, &proc_grid[0], MPI_COMM_WORLD, 
         &ce_S0_mat, NULL
     );
-    ca3dmm_engine_exec(NULL, 0, B_in, src_B_nrow, S0, S0_nrow, ce_S0_mat);
+    ca3dmm_engine_exec(ce_S0_mat, NULL, 0, B_in, src_B_nrow, S0, S0_nrow);
     mat_redist_engine_p S0_rdB = ce_S0_mat->redist_B;
     if ((S0_rdB->n_proc_send > 1) || (S0_rdB->n_proc_recv > 1))
         printf("Oh no, rank %d need to send/recv B_orth to/from other processes in computing S1 = B_orth^T * B_orth!\n", my_rank);
@@ -139,7 +139,7 @@ int main(int argc, char **argv)
         src_B_srow, src_B_nrow, src_B_scol, src_B_ncol,
         &proc_grid[0], MPI_COMM_WORLD, &ce_Borth_mat, NULL
     );
-    ca3dmm_engine_exec(B_in, src_B_nrow, S0, S0_nrow, B_orth, src_B_nrow, ce_Borth_mat);
+    ca3dmm_engine_exec(ce_Borth_mat, B_in, src_B_nrow, S0, S0_nrow, B_orth, src_B_nrow);
 
     // Compute S1 = B_orth^T * B_orth and check the correctness
     // Notice: need to swap the proc_grid from [kp, np, np] to [np, np, kp] to 
@@ -153,7 +153,7 @@ int main(int argc, char **argv)
         S1_srow, S1_nrow, S1_scol, S1_ncol, &proc_grid[0], MPI_COMM_WORLD, 
         &ce_S1_mat, NULL
     );
-    ca3dmm_engine_exec(NULL, 0, B_orth, src_B_nrow, S1, S1_nrow, ce_S1_mat);
+    ca3dmm_engine_exec(ce_S1_mat, NULL, 0, B_orth, src_B_nrow, S1, S1_nrow);
     mat_redist_engine_p S1_rdB = ce_S1_mat->redist_B;
     if ((S1_rdB->n_proc_send > 1) || (S1_rdB->n_proc_recv > 1))
         printf("Oh no, rank %d need to send/recv B_orth to/from other processes in computing S1 = B_orth^T * B_orth!\n", my_rank);

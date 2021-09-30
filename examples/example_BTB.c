@@ -102,12 +102,12 @@ int main(int argc, char **argv)
     }
 
     // Warm up running
-    ca3dmm_engine_exec(NULL, 0, B_in, B_in_nrow, C_out, C_out_nrow, ce);
+    ca3dmm_engine_exec(ce, NULL, 0, B_in, B_in_nrow, C_out, C_out_nrow);
     ca3dmm_engine_reset_stat(ce);
 
     // Timing running
     for (int itest = 0; itest < n_test; itest++)
-        ca3dmm_engine_exec(NULL, 0, B_in, B_in_nrow, C_out, C_out_nrow, ce);
+        ca3dmm_engine_exec(ce, NULL, 0, B_in, B_in_nrow, C_out, C_out_nrow);
     if (my_rank == 0) ca3dmm_engine_print_stat(ce);
 
     // Check the correctness of the result
