@@ -297,6 +297,7 @@ void cannon_engine_exec_cc1(
     }
 
     // Accumulate to final output
+    #pragma omp parallel for simd
     for (int i = 0; i < A_m * B_n; i++)
         C_blk[i] = alpha * C_buff[i] + beta * C_blk[i];
 
@@ -432,6 +433,7 @@ void cannon_engine_exec_cck(
 
     if (k_stack_size > 0)
     {
+        start_t = MPI_Wtime();
         double beta  = (gemm_step == 0) ? 0.0 : 1.0;
         double alpha = 1.0;
         cblas_dgemm(
@@ -440,9 +442,12 @@ void cannon_engine_exec_cck(
         );
         gemm_step++;
         k_stack_size = 0;
+        stop_t  = MPI_Wtime();
+        engine->gemm_ms += 1000.0 * (stop_t - start_t);
     }
 
     // Accumulate to final output
+    #pragma omp parallel for simd
     for (int i = 0; i < A_m * B_n; i++)
         C_blk[i] = alpha * C_buff[i] + beta * C_blk[i];
 
