@@ -140,7 +140,7 @@ int main(int argc, char **argv)
     }
 
     // Warm up running
-    ca3dmm_engine_exec(A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow, ce);
+    ca3dmm_engine_exec(ce, A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow);
     ca3dmm_engine_reset_stat(ce);
 
     // Timing running
@@ -155,7 +155,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < n_test; i++)
     {
         MPI_Barrier(MPI_COMM_WORLD);
-        ca3dmm_engine_exec(A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow, ce);
+        ca3dmm_engine_exec(ce, A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow);
         redist_mss[i] = ce->redist_ms - redist_ms;
         agvAB_mss[i]  = ce->agvAB_ms  - agvAB_ms;
         cannon_mss[i] = ce->cannon_ms - cannon_ms;

@@ -1,6 +1,6 @@
 // @brief    : Some helper functions I use here and there
 // @author   : Hua Huang <huangh223@gatech.edu>
-// @modified : 2021-09-25
+// @modified : 2021-10-08
 
 #include <stdio.h>
 #include <string.h>
@@ -139,7 +139,7 @@ void print_int_mat_blk(
 }
 
 // Print a row-major double matrix block to standard output
-void print_dbl_mat_blk(
+void print_dbl_mat_blk_rm(
     const double *mat, const int ldm, const int nrow, const int ncol, 
     const char *fmt, const char *mat_name
 )
@@ -158,3 +158,21 @@ void print_dbl_mat_blk(
     printf("\n");
 }
 
+// Print a column-major double matrix block to standard output
+void print_dbl_mat_blk_cm(
+    const double *mat, const int ldm, const int nrow, const int ncol, 
+    const char *fmt, const char *mat_name
+)
+{
+    printf("%s:\n", mat_name);
+    for (int i = 0; i < nrow; i++)
+    {
+        for (int j = 0; j < ncol; j++)
+        {
+            printf(fmt, mat[j * ldm + i]);
+            printf("  ");
+        }
+        printf("\n");
+    }
+    printf("\n");
+}

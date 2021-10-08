@@ -1,6 +1,6 @@
 // @brief    : Some helper functions I use here and there
 // @author   : Hua Huang <huangh223@gatech.edu>
-// @modified : 2021-09-25
+// @modified : 2021-10-08
 
 #ifndef __HUANGH223_UTILS_H__
 #define __HUANGH223_UTILS_H__
@@ -78,6 +78,18 @@ extern "C" {
         } else {                                \
             var = default_val;                  \
         }                                       \
+    } while (0)
+
+#define REALLOC_BUFFER(ptr, ptr_type, curr_bytes, new_bytes)    \
+    do                                                          \
+    {                                                           \
+        if ((new_bytes) > curr_bytes)                           \
+        {                                                       \
+            free(ptr);                                          \
+            ptr = NULL;                                         \
+            curr_bytes = (new_bytes);                           \
+            ptr = (ptr_type) malloc(curr_bytes);                \
+        }                                                       \
     } while (0)
 
 // Get wall-clock time in seconds
@@ -166,8 +178,16 @@ void print_int_mat_blk(
 );
 
 // Print a row-major double matrix block to standard output
-// Input / output parameters are the same as copy_int_mat_blk()
-void print_dbl_mat_blk(
+// Input / output parameters are the same as print_int_mat_blk()
+void print_dbl_mat_blk_rm(
+    const double *mat, const int ldm, const int nrow, const int ncol, 
+    const char *fmt, const char *mat_name
+);
+
+// Print a column-major double matrix block to standard output
+// Input / output parameters are the same as print_dbl_mat_blk_rm()
+// except that ldm >= nrow
+void print_dbl_mat_blk_cm(
     const double *mat, const int ldm, const int nrow, const int ncol, 
     const char *fmt, const char *mat_name
 );

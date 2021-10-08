@@ -767,10 +767,10 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
 
 // Perform Communication-Avoiding 3D Matrix Multiplication (CA3DMM)
 void ca3dmm_engine_exec(
+    ca3dmm_engine_p engine,
     const void *src_A, const int ldA,
     const void *src_B, const int ldB,
-    void *dst_C, const int ldC,
-    ca3dmm_engine_p engine
+    void *dst_C, const int ldC
 )
 {
     if (engine == NULL)
