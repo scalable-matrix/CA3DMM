@@ -38,7 +38,7 @@ int main(int argc, char **argv)
 
     device_type dev = (use_gpu)?DEVICE_TYPE_DEVICE:DEVICE_TYPE_HOST;
     device_type compute_device = dev;
-    device_type communication_device = dev;
+    device_type communication_device = DEVICE_TYPE_HOST;
 
     if (m != n)
     {
@@ -74,8 +74,8 @@ int main(int argc, char **argv)
     double *B_in  = (double *) malloc(B_in_msize);
     double *C_out = (double *) malloc(C_out_msize);
 
-    double *B_in_d  = _OUR_MALLOC(B_in_msize, compute_device);
-    double *C_out_d  = _OUR_MALLOC(C_out_msize, compute_device);
+    double *B_in_comm  = _OUR_MALLOC(B_in_msize, communication_device);
+    double *C_out_comm  = _OUR_MALLOC(C_out_msize, communication_device);
     for (int j = 0; j < B_in_ncol; j++)
     {
         int global_j = j + B_in_scol;
@@ -96,7 +96,7 @@ int main(int argc, char **argv)
         communication_device, compute_device,
         NULL, MPI_COMM_WORLD, &ce
     );
-    OUR_MEMCPY(B_in_d, B_in, B_in_msize, compute_device, DEVICE_TYPE_HOST);
+    OUR_MEMCPY(B_in_comm, B_in, B_in_msize, communication_device, DEVICE_TYPE_HOST);
     if (ce->my_rank == 0)
     {
         int mb = (m + ce->mp - 1) / ce->mp;
@@ -116,13 +116,13 @@ int main(int argc, char **argv)
     }
 
     // Warm up running
-    ca3dmm_engine_exec(NULL, 0, B_in_d, B_in_nrow, C_out_d, C_out_nrow, ce);
+    ca3dmm_engine_exec(NULL, 0, B_in_comm, B_in_nrow, C_out_comm, C_out_nrow, ce);
     ca3dmm_engine_reset_stat(ce);
 
     // Timing running
     for (int itest = 0; itest < n_test; itest++)
-        ca3dmm_engine_exec(NULL, 0, B_in_d, B_in_nrow, C_out_d, C_out_nrow, ce);
-    OUR_MEMCPY(C_out, C_out_d, C_out_msize, DEVICE_TYPE_HOST, compute_device);
+        ca3dmm_engine_exec(NULL, 0, B_in_comm, B_in_nrow, C_out_comm, C_out_nrow, ce);
+    OUR_MEMCPY(C_out, C_out_comm, C_out_msize, DEVICE_TYPE_HOST, communication_device);
     if (my_rank == 0) ca3dmm_engine_print_stat(ce);
 
     // Check the correctness of the result
@@ -182,8 +182,8 @@ int main(int argc, char **argv)
         free(B_chk);
         free(C_chk);
     }
-    OUR_FREE(B_in_d, compute_device);
-    OUR_FREE(C_out_d, compute_device);
+    OUR_FREE(B_in_comm, communication_device);
+    OUR_FREE(C_out_comm, communication_device);
 
     free(B_in);
     free(C_out);

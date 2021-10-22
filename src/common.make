@@ -7,7 +7,7 @@ LIB_OBJS = $(filter-out utils.c.o memory.c.o, $(C_OBJS))
 
 DEFS    = 
 INCS    = 
-CFLAGS  = $(INCS) -Wall -g -std=gnu11 -O0 -fPIC $(DEFS) -DDEBUG=0
+CFLAGS  = $(INCS) -Wall -g -std=gnu11 -O3 -fPIC $(DEFS) -DDEBUG=0
 
 ifeq ($(shell $(CC) --version 2>&1 | grep -c "icc"), 1)
 AR      = xiar rcs
@@ -35,8 +35,8 @@ LIB     += -lcublas
 INCS     += -I$(CUDA_ROOT)/include
 
 #TODO: Handle gcc case
-LDFLAGS = -ccbin=mpicc -Xcompiler -std=gnu++98,-mkl,-O0,-xHost,-g,-fPIC -G -lcuda -lcudart -lcublas -arch=sm_70 -gencode=arch=compute_70,code=sm_70
-CUFLAGS = $(DEFS) -O0 -g -Xcompiler -std=gnu++98,-O0,-g,-fPIC -G -arch=sm_70 -gencode=arch=compute_70,code=sm_70
+LDFLAGS = -ccbin=mpicc -Xcompiler -std=gnu++98,-mkl,-O3,-xHost,-g,-fPIC -G -lcuda -lcudart -lcublas -arch=sm_70 -gencode=arch=compute_70,code=sm_70
+CUFLAGS = $(DEFS) -O3 -g -Xcompiler -std=gnu++98,-O3,-g,-fPIC -G -arch=sm_70 -gencode=arch=compute_70,code=sm_70
 
 LINALG_OBJ := linalg_gpu.cu.o linalg_cpu.c.o
 
