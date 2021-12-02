@@ -1,9 +1,11 @@
 #ifndef __MAT_REDIST_H__
 #define __MAT_REDIST_H__
 
+#include "mpi.h"
+#include "dev_type.h"
+
 struct mat_redist_engine
 {
-    MPI_Comm input_comm;    // Input MPI communicator
     MPI_Comm graph_comm;    // New MPI communicator for neighbor alltoall
     MPI_Datatype dtype;     // Matrix element MPI data type
     size_t  dt_size;        // Matrix element MPI data type size in bytes
@@ -32,9 +34,14 @@ struct mat_redist_engine
     int     *rblk_sizes;    // Size n_proc_recv*4, each row describes a receive block's srow, scol, nrow, ncol
     int     *send_info0;    // Temporary work array for determining send and receive pairs
     int     *recv_info0;    // Temporary work array for determining send and receive pairs
-    void    *send_buf;      // Send buffer
-    void    *recv_buf;      // Receive buffer
-    void    *work_buf;      // Work buffer, all void * above are alias to work_buf
+    void    *sendbuf_h;     // Send buffer on host
+    void    *recvbuf_h;     // Receive buffer on host
+    void    *sendbuf_d;     // Send buffer on device
+    void    *recvbuf_d;     // Receive buffer on device
+    void    *workbuf_h;     // Work buffer, all void* with _h suffix above are aliases to workbuf_h
+    void    *workbuf_d;     // Work buffer, all void* with _d suffix above are aliases to workbuf_d
+    double  hd_trans_ms;    // Time (milliseconds) used in host-device data transfer
+    dev_type_t dev_type;    // Data resident device type
 };
 typedef struct mat_redist_engine  mat_redist_engine_s;
 typedef struct mat_redist_engine* mat_redist_engine_p;
@@ -53,6 +60,7 @@ extern "C" {
 //   comm            : MPI communicator
 //   dtype           : Matrix element MPI data type
 //   dt_size         : Matrix element MPI data type size in bytes
+//   dev_type        : Data resident device type
 // Output parameters:
 //   *engine_        : Initialized mat_redist_engine_p
 //   *workbuf_bytes  : Optional. If pointer is not NULL, the returning value is the size 
@@ -61,15 +69,19 @@ extern "C" {
 void mat_redist_engine_init(
     const int src_srow, const int src_scol, const int src_nrow, const int src_ncol, 
     const int req_srow, const int req_scol, const int req_nrow, const int req_ncol,
-    MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, mat_redist_engine_p *engine_,
-    size_t *workbuf_bytes
+    MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, dev_type_t dev_type,
+    mat_redist_engine_p *engine_, size_t *workbuf_bytes
 );
 
 // Attach an external work buffer for mat_redist_engine
 // Input parameters:
-//   engine   : Initialized mat_redist_engine_p
-//   work_buf : Work buffer, size >= *workbuf_bytes returned by mat_redist_engine_init()
-void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf);
+//   engine    : Initialized mat_redist_engine_p
+//   workbuf_h : Work buffer on host, size >= *workbuf_bytes returned by mat_redist_engine_init()
+//   workbuf_d : Work buffer on device, size >= *workbuf_bytes returned by mat_redist_engine_init()
+// Note:
+//   1. workbuf_d can be NULL if dev_type == DEV_TYPE_HOST
+//   2. workbuf_h can be NULL if dev_type == DEV_TYPE_CUDA_MPI_DIRECT
+void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *workbuf_h, void *workbuf_d);
 
 // Perform matrix data redistribution
 // Input parameters:

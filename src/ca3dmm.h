@@ -5,7 +5,7 @@
 #include "mat_redist.h"
 #include "cannon.h"
 #include "partition.h"
-#include "linalg_lib_wrapper.h"
+#include "dev_type.h"
 
 struct ca3dmm_engine
 {
@@ -37,15 +37,24 @@ struct ca3dmm_engine
     int  *AB_agv_recvcnts;          // Size unknown, recvcounts array used in MPI_Allgatherv after redistribution for A or B matrix
     int  *AB_agv_displs;            // Size unknown, displs array used in MPI_Allgatherv after redistribution for A or B matrix
     int  *C_rs_recvcnts;            // Size task_k_num, output C matrix block reduce-scatter receive count array
-    void *A_rd_recv;                // Size A_rd_nrow   * A_rd_ncol,   op(A) matrix block received in redistribution
-    void *A_trans;                  // Size A_2dmm_nrow * A_2dmm_ncol, A_2dmm transpose buffer
-    void *A_2dmm;                   // Size A_2dmm_nrow * A_2dmm_ncol, initial op(A) matrix block required in 2D matmul
-    void *B_rd_recv;                // Size B_rd_nrow   * B_rd_ncol,   op(A) matrix block received in redistribution
-    void *B_trans;                  // Size B_2dmm_nrow * B_2dmm_ncol, B_2dmm transpose buffer
-    void *B_2dmm;                   // Size B_2dmm_nrow * B_2dmm_ncol, initial op(B) matrix block required in 2D matmul
-    void *C_2dmm;                   // Size C_2dmm_nrow * C_2dmm_ncol, 2D matmul result C matrix block
-    void *C_out;                    // Size C_out_nrow  * C_out_ncol,  output C matrix block
-    void *work_buf;                 // Work buffer, all void * above are alias to work_buf
+    void *A_rd_recv_h;              // Size A_rd_nrow   * A_rd_ncol,   op(A) matrix block received in redistribution, on host
+    void *A_trans_h;                // Size A_2dmm_nrow * A_2dmm_ncol, A_2dmm transpose buffer, on host
+    void *A_2dmm_h;                 // Size A_2dmm_nrow * A_2dmm_ncol, initial op(A) matrix block required in 2D matmul, on host
+    void *B_rd_recv_h;              // Size B_rd_nrow   * B_rd_ncol,   op(A) matrix block received in redistribution, on host
+    void *B_trans_h;                // Size B_2dmm_nrow * B_2dmm_ncol, B_2dmm transpose buffer, on host
+    void *B_2dmm_h;                 // Size B_2dmm_nrow * B_2dmm_ncol, initial op(B) matrix block required in 2D matmul, on host
+    void *C_2dmm_h;                 // Size C_2dmm_nrow * C_2dmm_ncol, 2D matmul result C matrix block, on host
+    void *C_out_h;                  // Size C_out_nrow  * C_out_ncol,  output C matrix block, on host
+    void *A_rd_recv_d;              // Size A_rd_nrow   * A_rd_ncol,   op(A) matrix block received in redistribution, on device
+    void *A_trans_d;                // Size A_2dmm_nrow * A_2dmm_ncol, A_2dmm transpose buffer, on device
+    void *A_2dmm_d;                 // Size A_2dmm_nrow * A_2dmm_ncol, initial op(A) matrix block required in 2D matmul, on device
+    void *B_rd_recv_d;              // Size B_rd_nrow   * B_rd_ncol,   op(A) matrix block received in redistribution, on device
+    void *B_trans_d;                // Size B_2dmm_nrow * B_2dmm_ncol, B_2dmm transpose buffer, on device
+    void *B_2dmm_d;                 // Size B_2dmm_nrow * B_2dmm_ncol, initial op(B) matrix block required in 2D matmul, on device
+    void *C_2dmm_d;                 // Size C_2dmm_nrow * C_2dmm_ncol, 2D matmul result C matrix block, on device
+    void *C_out_d;                  // Size C_out_nrow  * C_out_ncol,  output C matrix block, on device
+    void *workbuf_h;                // Work buffer, all void* with _h suffix above are aliases to workbuf_h
+    void *workbuf_d;                // Work buffer, all void* with _h suffix above are aliases to workbuf_d
     size_t   rdA_workbuf_bytes;     // redist_A work buffer size in bytes
     size_t   rdB_workbuf_bytes;     // redist_B work buffer size in bytes
     size_t   rdC_workbuf_bytes;     // redist_C work buffer size in bytes
@@ -58,6 +67,7 @@ struct ca3dmm_engine
     mat_redist_engine_p redist_B;   // Redistribution of B matrix from its initial layout to CA3DMM required layout
     mat_redist_engine_p redist_C;   // Redistribution of C matrix from CA3DMM output layout to required layout
     cannon_engine_p cannon_engine;  // cannon_engine for 2D matmul
+    dev_type_t dev_type;            // Data resident device type
 
     // Statistic data
     int    print_timing;            // If rank 0 should print timing in each ca3dmm_engine_exec
@@ -66,6 +76,7 @@ struct ca3dmm_engine
     double agvAB_ms;                // Time (milliseconds) used in MPI_Allgatherv of A or B
     double cannon_ms;               // Time (milliseconds) used in 2D matmul
     double reduce_ms;               // Time (milliseconds) used in k dimension reduction
+    double hd_trans_ms;             // Time (milliseconds) used in host-device data transfer
     double exec_ms;                 // Time (milliseconds) used in the whole CA3DMM algorithm execution
     int    n_exec;                  // Number of CA3DMM algorithm execution
 };
@@ -91,6 +102,7 @@ extern "C" {
 //   proc_grid       : MPI process grid [mp, np, kp], max(mp, np) must be a multiplier of min(np, mp).
 //                     If proc_grid == NULL, CA3DMM will find a process grid solution.
 //   comm            : MPI communicator of all MPI processes participating CA3DMM
+//   dev_type        : Data resident device type
 // Output parameter:
 //   *engine_       : Pointer to an initialized camm3d_engine structure
 //   *workbuf_bytes : Optional. If pointer is not NULL, the returning value is the size 
@@ -107,7 +119,7 @@ void ca3dmm_engine_init(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, 
+    const int *proc_grid, MPI_Comm comm, dev_type_t dev_type, 
     ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 );
 
@@ -125,6 +137,7 @@ void ca3dmm_engine_init(
 //   proc_grid  : MPI process grid [mp, np, kp], mp must == np.
 //                If proc_grid == NULL, CA3DMM will find a process grid solution.
 //   comm       : MPI communicator of all MPI processes participating CA3DMM
+//   dev_type   : Data resident device type
 // Output parameter:
 //   *engine_       : Pointer to an initialized camm3d_engine structure
 //   *workbuf_bytes : Optional. If pointer is not NULL, the returning value is the size 
@@ -139,16 +152,19 @@ void ca3dmm_engine_init_BTB(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, 
+    const int *proc_grid, MPI_Comm comm, dev_type_t dev_type, 
     ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 );
 
 // Attach an external work buffer for camm3d_engine
 // Input parameters:
-//   engine   : Initialized camm3d_engine_p
-//   work_buf : Work buffer, size >= *workbuf_bytes returned by 
-//              ca3dmm_engine_init() or ca3dmm_engine_init_BTB()
-void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *work_buf);
+//   engine   : Initialized cannon_engine_p
+//   workbuf_h : Work buffer on host, size >= *workbuf_bytes returned by ca3dmm_engine_init(_BTB)()
+//   workbuf_d : Work buffer on device, size >= *workbuf_bytes returned by ca3dmm_engine_init(_BTB)()
+// Note:
+//   1. workbuf_d can be NULL if dev_type == DEV_TYPE_HOST
+//   2. workbuf_h can be NULL if dev_type == DEV_TYPE_CUDA_MPI_DIRECT
+void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *workbuf_h, void *workbuf_d);
 
 // Free a camm3d_engine structure
 void ca3dmm_engine_free(ca3dmm_engine_p *engine_);
@@ -173,10 +189,8 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_);
 //   C_out_scol  : First column      of output C matrix on this MPI process
 //   C_out_ncol  : Number of columns of output C matrix on this MPI process
 void ca3dmm_engine_exec(
-    ca3dmm_engine_p engine,
-    const void *src_A, const int ldA,
-    const void *src_B, const int ldB,
-    void *dst_C, const int ldC
+    ca3dmm_engine_p engine, const void *src_A, const int ldA,
+    const void *src_B, const int ldB, void *dst_C, const int ldC
 );
 
 // Reset statistic data of a ca3dmm_engine (not a collective call)

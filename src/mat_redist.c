@@ -44,10 +44,16 @@ static void calc_rect_intersection(
 void mat_redist_engine_init(
     const int src_srow, const int src_scol, const int src_nrow, const int src_ncol, 
     const int req_srow, const int req_scol, const int req_nrow, const int req_ncol,
-    MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, mat_redist_engine_p *engine_,
-    size_t *workbuf_bytes
+    MPI_Comm comm, MPI_Datatype dtype, const size_t dt_size, dev_type_t dev_type,
+    mat_redist_engine_p *engine_, size_t *workbuf_bytes
 )
 {
+    if (is_dev_type_valid(dev_type) == 0)
+    {
+        ERROR_PRINTF("Invalid device type %d\n", dev_type);
+        return;
+    }
+
     mat_redist_engine_p engine = (mat_redist_engine_p) malloc(sizeof(mat_redist_engine_s));
     memset(engine, 0, sizeof(mat_redist_engine_s));
 
@@ -55,19 +61,19 @@ void mat_redist_engine_init(
     int nproc, rank;
     MPI_Comm_size(comm, &nproc);
     MPI_Comm_rank(comm, &rank);
-    engine->input_comm = comm;
-    engine->rank       = rank;
-    engine->nproc      = nproc;
-    engine->dtype      = dtype;
-    engine->dt_size    = dt_size;
-    engine->src_srow   = src_srow;
-    engine->src_nrow   = src_nrow;
-    engine->src_scol   = src_scol;
-    engine->src_ncol   = src_ncol;
-    engine->req_srow   = req_srow;
-    engine->req_nrow   = req_nrow;
-    engine->req_scol   = req_scol;
-    engine->req_ncol   = req_ncol;
+    engine->rank     = rank;
+    engine->nproc    = nproc;
+    engine->dtype    = dtype;
+    engine->dt_size  = dt_size;
+    engine->src_srow = src_srow;
+    engine->src_nrow = src_nrow;
+    engine->src_scol = src_scol;
+    engine->src_ncol = src_ncol;
+    engine->req_srow = req_srow;
+    engine->req_nrow = req_nrow;
+    engine->req_scol = req_scol;
+    engine->req_ncol = req_ncol;
+    engine->dev_type = dev_type;
 
     // Gather all processes' source and required block info
     int src_erow = src_srow + src_nrow - 1;
@@ -146,47 +152,6 @@ void mat_redist_engine_init(
     engine->recv_cnt    = recv_cnt;
     engine->recv_info0  = recv_info0;
 
-    size_t workbuf_bytes_ = 0;
-    workbuf_bytes_ += dt_size * send_cnt;  // send_buf
-    workbuf_bytes_ += dt_size * recv_cnt;  // recv_buf
-
-    if (workbuf_bytes != NULL)
-    {
-        engine->alloc_workbuf = 0;
-        *workbuf_bytes = workbuf_bytes_;
-    } else {
-        engine->alloc_workbuf = 1;
-        void *work_buf = malloc(workbuf_bytes_);
-        if (work_buf == NULL)
-        {
-            ERROR_PRINTF("Failed to allocate work buffer of size %zu bytes for mat_redist_engine\n", workbuf_bytes_);
-            mat_redist_engine_free(&engine);
-            return;
-        }
-        mat_redist_engine_attach_workbuf(engine, work_buf);
-    }
-
-    free(all_src_req_info);
-    *engine_ = engine;
-
-    MPI_Barrier(engine->input_comm);
-}
-
-// Attach an external work buffer for mat_redist_engine
-void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf)
-{
-    if (engine == NULL)
-    {
-        WARNING_PRINTF("mat_redist_engine not initialized\n");
-        return;
-    }
-
-    const int n_proc_send = engine->n_proc_send;
-    const int n_proc_recv = engine->n_proc_recv;
-    const int dt_size     = engine->dt_size;
-    const int send_cnt    = engine->send_cnt;
-    const int recv_cnt    = engine->recv_cnt;
-
     // No need to use external work buffer for integer arrays,
     // these arrays should be accessed on host
     engine->send_ranks  = (int *) malloc(sizeof(int) * n_proc_send);
@@ -198,13 +163,7 @@ void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf
     engine->recv_displs = (int *) malloc(sizeof(int) * (n_proc_recv + 1));
     engine->rblk_sizes  = (int *) malloc(sizeof(int) * n_proc_recv * 4);
 
-    // Assign work buffer
-    engine->send_buf = (void *) work_buf;
-    engine->recv_buf = (void *) ((char *) engine->send_buf + dt_size * send_cnt);
-    engine->work_buf = work_buf;
-
     // Set up send blocks metadata
-    int *send_info0  = engine->send_info0;
     int *sblk_sizes  = engine->sblk_sizes;
     int *send_ranks  = engine->send_ranks;
     int *send_displs = engine->send_displs;
@@ -226,7 +185,6 @@ void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf
     engine->send_info0 = NULL;
 
     // Set up receive blocks metadata
-    int *recv_info0  = engine->recv_info0;
     int *rblk_sizes  = engine->rblk_sizes;
     int *recv_ranks  = engine->recv_ranks;
     int *recv_displs = engine->recv_displs;
@@ -248,14 +206,64 @@ void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *work_buf
     engine->recv_info0 = NULL;
 
     // Build a new communicator with graph info
-    if (engine->work_buf != NULL)
+    int reorder = 0;
+    MPI_Dist_graph_create_adjacent(
+        comm, n_proc_recv, recv_ranks, MPI_UNWEIGHTED, n_proc_send, 
+        send_ranks, MPI_UNWEIGHTED, MPI_INFO_NULL, reorder, &engine->graph_comm
+    );
+
+    // Calculate work buffer size and allocate it if needed
+    size_t workbuf_bytes_ = 0;
+    workbuf_bytes_ += dt_size * send_cnt;  // send_buf
+    workbuf_bytes_ += dt_size * recv_cnt;  // recv_buf
+    if (workbuf_bytes != NULL)
     {
-        int reorder = 0;
-        MPI_Dist_graph_create_adjacent(
-            engine->input_comm, n_proc_recv, recv_ranks, MPI_UNWEIGHTED, n_proc_send, 
-            send_ranks, MPI_UNWEIGHTED, MPI_INFO_NULL, reorder, &engine->graph_comm
+        engine->alloc_workbuf = 0;
+        *workbuf_bytes = workbuf_bytes_;
+    } else {
+        engine->alloc_workbuf = 1;
+        void *workbuf_h, *workbuf_d;
+        MALLOC_ATTACH_WORKBUF(
+            mat_redist_engine_attach_workbuf, mat_redist_engine_free, 
+            engine, dev_type, workbuf_bytes_, workbuf_h, workbuf_d
         );
     }
+
+    free(all_src_req_info);
+    *engine_ = engine;
+
+    MPI_Barrier(comm);
+}
+
+// Attach an external work buffer for mat_redist_engine
+void mat_redist_engine_attach_workbuf(mat_redist_engine_p engine, void *workbuf_h, void *workbuf_d)
+{
+    if (engine == NULL)
+    {
+        WARNING_PRINTF("mat_redist_engine not initialized\n");
+        return;
+    }
+
+    int dt_size  = engine->dt_size;
+    int send_cnt = engine->send_cnt;
+
+    engine->workbuf_h = workbuf_h;
+    engine->workbuf_d = workbuf_d;
+
+    dev_type_t dev_type = engine->dev_type;
+    if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA))
+    {
+        engine->sendbuf_h = (void *) workbuf_h;
+        engine->recvbuf_h = (void *) ((char *) engine->sendbuf_h + dt_size * send_cnt);
+    }
+
+    #ifdef USE_CUDA
+    if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+    {
+        engine->sendbuf_d = (void *) workbuf_d;
+        engine->recvbuf_d = (void *) ((char *) engine->sendbuf_d + dt_size * send_cnt);
+    }
+    #endif
 }
 
 // Destroy a mat_redist_engine_s
@@ -263,7 +271,16 @@ void mat_redist_engine_free(mat_redist_engine_p *engine_)
 {
     mat_redist_engine_p engine = *engine_;
     if (engine == NULL) return;
-    if (engine->alloc_workbuf) free(engine->work_buf);
+    dev_type_t dev_type = engine->dev_type;
+    if (engine->alloc_workbuf)
+    {
+        if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA))
+            dev_type_free(engine->workbuf_h, DEV_TYPE_HOST);
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+            dev_type_free(engine->workbuf_d, dev_type);
+        #endif
+    }
     free(engine->send_ranks);
     free(engine->send_sizes);
     free(engine->send_displs);
@@ -272,7 +289,7 @@ void mat_redist_engine_free(mat_redist_engine_p *engine_)
     free(engine->recv_sizes);
     free(engine->recv_displs);
     free(engine->rblk_sizes);
-    if (engine->work_buf != NULL) MPI_Comm_free(&engine->graph_comm);
+    MPI_Comm_free(&engine->graph_comm);
     free(engine);
     *engine_ = NULL;
 }
@@ -290,6 +307,12 @@ void mat_redist_engine_exec(
     }
 
     size_t dt_size = engine->dt_size;
+    int send_cnt = engine->send_cnt;
+    int recv_cnt = engine->recv_cnt;
+    dev_type_t dev_type = engine->dev_type;
+
+    double hd_start_t, hd_stop_t;
+    engine->hd_trans_ms = 0.0;
 
     // Pack the send_buf
     int  src_srow     = engine->src_srow;
@@ -298,7 +321,8 @@ void mat_redist_engine_exec(
     int  *send_sizes  = engine->send_sizes;
     int  *send_displs = engine->send_displs;
     int  *sblk_sizes  = engine->sblk_sizes;
-    char *send_buf    = (char*) engine->send_buf;
+    char *sendbuf_h   = (char*) engine->sendbuf_h;
+    char *sendbuf_d   = (char*) engine->sendbuf_d;
     char *src_blk_    = (char*) src_blk;
     for (int isend = 0; isend < n_proc_send; isend++)
     {
@@ -309,19 +333,58 @@ void mat_redist_engine_exec(
         int i_send_ncol = i_sblk_size[3];
         int local_srow  = i_send_srow - src_srow;
         int local_scol  = i_send_scol - src_scol;
-        char *i_send_buf  = send_buf + dt_size * send_displs[isend];
         const char *i_send_src = src_blk_ + dt_size * (local_srow * src_ld + local_scol);
-        copy_matrix_block(dt_size, i_send_nrow, i_send_ncol, i_send_src, src_ld, i_send_buf, i_send_ncol, 1);
+        char *i_send_buf;
+        if (dev_type == DEV_TYPE_HOST)
+            i_send_buf = sendbuf_h + dt_size * send_displs[isend];
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+            i_send_buf = sendbuf_d + dt_size * send_displs[isend];
+        #endif
+        dev_type_copy_mat_blk(
+            dt_size, i_send_nrow, i_send_ncol, 
+            i_send_src, src_ld, i_send_buf, i_send_ncol, dev_type
+        );
     }  // End of isend loop
 
     // Redistribute data using MPI_Neighbor_alltoallv
     int  *recv_sizes  = engine->recv_sizes;
     int  *recv_displs = engine->recv_displs;
-    void *recv_buf    = engine->recv_buf;
-    MPI_Neighbor_alltoallv(
-        send_buf, send_sizes, send_displs, engine->dtype, 
-        recv_buf, recv_sizes, recv_displs, engine->dtype, engine->graph_comm
-    );
+    void *recvbuf_h   = engine->recvbuf_h;
+    void *recvbuf_d   = engine->recvbuf_d;
+    if (dev_type == DEV_TYPE_HOST)
+    {
+        MPI_Neighbor_alltoallv(
+            sendbuf_h, send_sizes, send_displs, engine->dtype, 
+            recvbuf_h, recv_sizes, recv_displs, engine->dtype, engine->graph_comm
+        );
+    }
+    #ifdef USE_CUDA
+    if (dev_type == DEV_TYPE_CUDA)
+    {
+        hd_start_t = MPI_Wtime();
+        dev_type_memcpy(sendbuf_h, sendbuf_d, dt_size * send_cnt, DEV_TYPE_HOST, dev_type);
+        hd_stop_t = MPI_Wtime();
+        engine->hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+        
+        MPI_Neighbor_alltoallv(
+            sendbuf_h, send_sizes, send_displs, engine->dtype, 
+            recvbuf_h, recv_sizes, recv_displs, engine->dtype, engine->graph_comm
+        );
+        
+        hd_start_t = MPI_Wtime();
+        dev_type_memcpy(recvbuf_d, recvbuf_h, dt_size * recv_cnt, dev_type, DEV_TYPE_HOST);
+        hd_stop_t = MPI_Wtime();
+        engine->hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+    }
+    if (dev_type == DEV_TYPE_CUDA_MPI_DIRECT)
+    {
+        MPI_Neighbor_alltoallv(
+            sendbuf_d, send_sizes, send_displs, engine->dtype, 
+            recvbuf_d, recv_sizes, recv_displs, engine->dtype, engine->graph_comm
+        );
+    }
+    #endif
 
     // Repack received blocks
     int  req_srow    = engine->req_srow;
@@ -338,9 +401,18 @@ void mat_redist_engine_exec(
         int i_recv_ncol = i_rblk_size[3];
         int local_srow  = i_recv_srow - req_srow;
         int local_scol  = i_recv_scol - req_scol;
-        char *i_recv_buf = recv_buf + dt_size * recv_displs[irecv];
         char *i_recv_dst = dst_blk_ + dt_size * (local_srow * dst_ld + local_scol);
-        copy_matrix_block(dt_size, i_recv_nrow, i_recv_ncol, i_recv_buf, i_recv_ncol, i_recv_dst, dst_ld, 1);
+        char *i_recv_buf;
+        if (dev_type == DEV_TYPE_HOST)
+            i_recv_buf = recvbuf_h + dt_size * recv_displs[irecv];
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+            i_recv_buf = recvbuf_d + dt_size * recv_displs[irecv];
+        #endif
+        dev_type_copy_mat_blk(
+            dt_size, i_recv_nrow, i_recv_ncol, 
+            i_recv_buf, i_recv_ncol, i_recv_dst, dst_ld, dev_type
+        );
     }  // End of recv_cnt loop
 
     MPI_Barrier(engine->graph_comm);

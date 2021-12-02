@@ -1,7 +1,7 @@
-#ifndef __LINALG_LIB_WRAPPER_H__
-#define __LINALG_LIB_WRAPPER_H__
+#ifndef __CPU_LINALG_LIB_WRAPPER_H__
+#define __CPU_LINALG_LIB_WRAPPER_H__
 
-// Wrapper for linear algebra library (BLAS, LAPACK)
+// Wrapper for CPU linear algebra library (BLAS, LAPACK)
 
 #if !defined(USE_MKL) && !defined(USE_OPENBLAS) 
 #define USE_OPENBLAS

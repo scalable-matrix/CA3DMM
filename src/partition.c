@@ -4,6 +4,7 @@
 #include <math.h>
 
 #include "partition.h"
+#include "utils.h"
 
 double max_min_ratio(const int n_elem, double *a)
 {
@@ -181,6 +182,14 @@ void calc_3d_decomposition(
     *np = proc_grid[idx_grid[1]];
     *kp = proc_grid[idx_grid[2]];
     *rp = p - (*mp) * (*np) * (*kp);
+
+    if (*rp * 5 > p)
+    {
+        WARNING_PRINTF(
+            "Failed to find a good solution, current: %d * %d * %d + %d\n", 
+            *mp, *np, *kp, *rp
+        );
+    }
 }
 
 // Calculate the near-optimal 3D decomposition of cuboid of size n * n * k for p processes
@@ -190,35 +199,33 @@ void calc_3d_decomposition_nk(
 )
 {
     int tmp_mp = 1, tmp_np = 1, tmp_kp = 1, tmp_rp;
-    double tmp_m = n;
-    double tmp_n = n;
-    double tmp_k = k;
-    double tmp_p = p;
-    while (tmp_p >= 2.0)
-    {
-        if ((tmp_m >= tmp_n) && (tmp_m >= tmp_k))
-        {
-            tmp_mp *= 2;
-            tmp_m  *= 0.5;
-        } 
-        else if ((tmp_n >= tmp_m) && (tmp_n >= tmp_k))
-        {
-            tmp_np *= 2;
-            tmp_n  *= 0.5;
-        }
-        else
-        {
-            tmp_kp *= 2;
-            tmp_k  *= 0.5;
-        }
-        tmp_p *= 0.5;
-    }
-    tmp_np = (int) round(sqrt((double) (tmp_mp * tmp_np)));
-    if (tmp_np * tmp_np > p) tmp_np--;
-    tmp_mp = tmp_np;
-    tmp_kp = (int) floor((double) p / (double) (tmp_mp * tmp_np));
+    double d = (double) k / (double) n;
+    tmp_mp = (int) ceil(cbrt((double) p / d));
+    tmp_np = tmp_mp;
+    tmp_kp = p / (tmp_mp * tmp_np);
     tmp_rp = p - tmp_mp * tmp_np * tmp_kp;
     *np = tmp_np;
     *kp = tmp_kp;
     *rp = tmp_rp;
+    while (tmp_mp > 1)
+    {
+        tmp_mp--; tmp_np--;
+        tmp_kp = p / (tmp_mp * tmp_np);
+        tmp_rp = p - tmp_mp * tmp_np * tmp_kp;
+        double d1 = (double) tmp_kp / (double) tmp_np;
+        if (d1 >= 4.0 * d) break;
+        if (tmp_rp < *rp)
+        {
+            *np = tmp_np;
+            *kp = tmp_kp;
+            *rp = tmp_rp;
+        }
+    }
+    if (*rp * 5 > p)
+    {
+        WARNING_PRINTF(
+            "Failed to find a good solution, current: %d * %d * %d + %d\n", 
+            *np, *np, *kp, *rp
+        );
+    }
 }
