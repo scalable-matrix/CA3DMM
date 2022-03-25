@@ -1,6 +1,6 @@
 // @brief    : Some helper functions I use here and there
 // @author   : Hua Huang <huangh223@gatech.edu>
-// @modified : 2021-10-08
+// @modified : 2022-01-19
 
 #include <stdio.h>
 #include <string.h>
@@ -175,4 +175,23 @@ void print_dbl_mat_blk_cm(
         printf("\n");
     }
     printf("\n");
+}
+
+// Transpose a column matrix (OMP parallelized, but not optimized)
+void transpose_cm_mat(
+    const int nrow, const int ncol, const double *A, const int ldA,
+    double *AT, const int ldAT
+)
+{
+    // TODO: use blocking
+    #pragma omp parallel for
+    for (int j = 0; j < ncol; j++)
+    {
+        for (int i = 0; i < nrow; i++)
+        {
+            int idx0 = i * ldA  + j;
+            int idx1 = j * ldAT + i;
+            AT[idx1] = A[idx0];
+        }
+    }
 }

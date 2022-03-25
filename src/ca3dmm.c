@@ -7,6 +7,7 @@
 
 #include "utils.h"
 #include "ca3dmm.h"
+#include "mpi_op_omp.h"
 #ifdef USE_CUDA
 #include "cuda_proxy.h"
 #endif
@@ -16,24 +17,6 @@ static inline void swap_int(int *a, int *b)
     int tmp = *a;
     *a = *b;
     *b = tmp;
-}
-
-static inline void transpose_cm_mat(
-    const int A_nrow, const int A_ncol, const double *A, const int ldA,
-    double *A_trans, const int ldAT
-)
-{
-    // TODO: use blocking
-    #pragma omp parallel for
-    for (int j = 0; j < A_ncol; j++)
-    {
-        for (int i = 0; i < A_nrow; i++)
-        {
-            int idx0 = i * ldA  + j;
-            int idx1 = j * ldAT + i;
-            A_trans[idx1] = A[idx0];
-        }
-    }
 }
 
 // Initialize a camm3d_engine structure for C := op(A) * op(B)
@@ -89,7 +72,7 @@ void ca3dmm_engine_init(
     {
         calc_3d_decomposition(p, m, n, k, &mp, &np, &kp, &rp);
         int reduce_kp;
-        GET_ENV_INT_VAR(reduce_kp, "CA3DMM_REDUCE_KP", "reduce_kp", 1, 0, 1);
+        GET_ENV_INT_VAR(reduce_kp, "CA3DMM_REDUCE_KP", "reduce_kp", 0, 0, 1);
         if (reduce_kp)
         {
             if ((kp >= 3) && (kp % 3 == 0))
@@ -1325,16 +1308,18 @@ void ca3dmm_engine_exec(
                 hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
             }
             #endif
+            MPI_Op op_omp_sum = MPI_SUM;
+            MPI_Op_omp_sum_get(&op_omp_sum);
             if (engine->use_rsb)
             {
                 MPI_Reduce_scatter_block(
                     C_2dmm_ptr, C_out_ptr, engine->C_rs_recvcnts[0], MPI_DOUBLE, 
-                    MPI_SUM, engine->comm_C_rs
+                    op_omp_sum, engine->comm_C_rs
                 );
             } else {
                 MPI_Reduce_scatter(
                     C_2dmm_ptr, C_out_ptr, engine->C_rs_recvcnts, MPI_DOUBLE, 
-                    MPI_SUM, engine->comm_C_rs
+                    op_omp_sum, engine->comm_C_rs
                 );
             }
             #ifdef USE_CUDA

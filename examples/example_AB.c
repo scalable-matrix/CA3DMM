@@ -31,6 +31,15 @@ int main(int argc, char **argv)
     int n_test  = get_int_param(argc, argv, 7, 10, 1, 100);
     dev_type_t dev_type = get_int_param(argc, argv, 8, DEV_TYPE_HOST, DEV_TYPE_HOST, DEV_TYPE_CUDA_MPI_DIRECT);
 
+    int *proc_grid = NULL;
+    if (argc >= 12)
+    {
+        proc_grid = (int *) malloc(sizeof(int) * 3);
+        proc_grid[0] = atoi(argv[9]);
+        proc_grid[1] = atoi(argv[10]);
+        proc_grid[2] = atoi(argv[11]);
+    }
+
     #ifdef USE_CUDA
     if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
         select_cuda_device_by_mpi_local_rank();
@@ -128,7 +137,7 @@ int main(int argc, char **argv)
         A_in_srow,  A_in_nrow,  A_in_scol,  A_in_ncol,
         B_in_srow,  B_in_nrow,  B_in_scol,  B_in_ncol,
         C_out_srow, C_out_nrow, C_out_scol, C_out_ncol,
-        NULL, MPI_COMM_WORLD, dev_type, 
+        proc_grid, MPI_COMM_WORLD, dev_type, 
         &ce, &ce_workbuf_bytes
     );
     void *workbuf_h, *workbuf_d;
@@ -310,6 +319,7 @@ int main(int argc, char **argv)
     dev_type_free(C_out_d, dev_type);
     dev_type_free(workbuf_h, DEV_TYPE_HOST);
     dev_type_free(workbuf_d, dev_type);
+    free(proc_grid);
     ca3dmm_engine_free(&ce);
     MPI_Finalize();
     return 0;

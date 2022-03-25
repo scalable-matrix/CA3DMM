@@ -1,6 +1,6 @@
 // @brief    : Some helper functions I use here and there
 // @author   : Hua Huang <huangh223@gatech.edu>
-// @modified : 2021-10-09
+// @modified : 2022-01-19
 
 #ifndef __HUANGH223_UTILS_H__
 #define __HUANGH223_UTILS_H__
@@ -192,6 +192,20 @@ void print_dbl_mat_blk_rm(
 void print_dbl_mat_blk_cm(
     const double *mat, const int ldm, const int nrow, const int ncol, 
     const char *fmt, const char *mat_name
+);
+
+// Transpose a column matrix (OMP parallelized, but not optimized)
+// Input parameters:
+//   nrow : Number of rows of the transposed matrix
+//   ncol : Number of columns of the transposed matrix
+//   A    : Size >= ldA * nrow, column-major source matrix
+//   ldA  : Leading dimension of A, >= ncol
+//   ldAT : Leading dimension of AT, >= nrow
+// Output parameter:
+//   AT   : Size >= ldA * ncol, column-major transposed matrix
+void transpose_cm_mat(
+    const int nrow, const int ncol, const double *A, const int ldA,
+    double *AT, const int ldAT
 );
 
 #ifdef __cplusplus
