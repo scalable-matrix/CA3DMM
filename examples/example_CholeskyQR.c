@@ -8,7 +8,11 @@
 
 #include "ca3dmm.h"
 #include "example_utils.h"
-#include "utils.h"  // in CA3DMM's include/
+#include "utils.h"
+#include "cpu_linalg_lib_wrapper.h"
+#ifdef USE_CUDA
+#include "cuda_proxy.h"
+#endif
 
 int main(int argc, char **argv)
 {
@@ -30,6 +34,13 @@ int main(int argc, char **argv)
     int B_ncol = get_int_param(argc, argv, 2,   500, 1, 16384);
     if (my_rank == 0) printf("Random matrix B size %d * %d\n", B_nrow, B_ncol);
 
+    dev_type_t dev_type = DEV_TYPE_HOST;
+
+    #ifdef USE_CUDA
+    if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+        select_cuda_device_by_mpi_local_rank();
+    #endif
+
     // Query the ideal partitioning of B and grid size. External application can 
     // organize all active processes (ce->is_active == 1) into a 2D grid by grouping
     // all ranks with the same src_B_scol into a column communicator and all ranks
@@ -40,7 +51,8 @@ int main(int argc, char **argv)
     size_t ce_workbuf_bytes;
     ca3dmm_engine_init_BTB(
         B_ncol, B_nrow, 0, B_nrow, 0, B_ncol, 
-        -1, -1, -1, -1, NULL, MPI_COMM_WORLD, &ce, &ce_workbuf_bytes
+        -1, -1, -1, -1, NULL, MPI_COMM_WORLD, 
+        dev_type, &ce, &ce_workbuf_bytes
     );
     // Since we don't need to use ce here, we do not need to attach work buffer for it
     src_B_srow = ce->B_rd_srow;
@@ -97,7 +109,7 @@ int main(int argc, char **argv)
     ca3dmm_engine_init_BTB(
         B_ncol, B_nrow, src_B_srow, src_B_nrow, src_B_scol, src_B_ncol, 
         S0_srow, S0_nrow, S0_scol, S0_ncol, &proc_grid[0], MPI_COMM_WORLD, 
-        &ce_S0_mat, NULL
+        dev_type, &ce_S0_mat, NULL
     );
     ca3dmm_engine_exec(ce_S0_mat, NULL, 0, B_in, src_B_nrow, S0, S0_nrow);
     mat_redist_engine_p S0_rdB = ce_S0_mat->redist_B;
@@ -137,7 +149,7 @@ int main(int argc, char **argv)
         src_B_srow, src_B_nrow, src_B_scol, src_B_ncol,
         S0_srow, S0_nrow, S0_scol, S0_ncol, 
         src_B_srow, src_B_nrow, src_B_scol, src_B_ncol,
-        &proc_grid[0], MPI_COMM_WORLD, &ce_Borth_mat, NULL
+        &proc_grid[0], MPI_COMM_WORLD, dev_type, &ce_Borth_mat, NULL
     );
     ca3dmm_engine_exec(ce_Borth_mat, B_in, src_B_nrow, S0, S0_nrow, B_orth, src_B_nrow);
 
@@ -151,7 +163,7 @@ int main(int argc, char **argv)
     ca3dmm_engine_init_BTB(
         B_ncol, B_nrow, src_B_srow, src_B_nrow, src_B_scol, src_B_ncol, 
         S1_srow, S1_nrow, S1_scol, S1_ncol, &proc_grid[0], MPI_COMM_WORLD, 
-        &ce_S1_mat, NULL
+        dev_type, &ce_S1_mat, NULL
     );
     ca3dmm_engine_exec(ce_S1_mat, NULL, 0, B_orth, src_B_nrow, S1, S1_nrow);
     mat_redist_engine_p S1_rdB = ce_S1_mat->redist_B;

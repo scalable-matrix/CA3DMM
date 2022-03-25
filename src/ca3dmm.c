@@ -5,11 +5,11 @@
 #include <math.h>
 #include <mpi.h>
 
-#include "partition.h"
 #include "utils.h"
-#include "cannon.h"
 #include "ca3dmm.h"
-#include "mat_redist.h"
+#ifdef USE_CUDA
+#include "cuda_proxy.h"
+#endif
 
 static inline void swap_int(int *a, int *b)
 {
@@ -45,11 +45,17 @@ void ca3dmm_engine_init(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, 
+    const int *proc_grid, MPI_Comm comm, dev_type_t dev_type, 
     ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 )
 {
     *engine_ = NULL;
+    if (is_dev_type_valid(dev_type) == 0)
+    {
+        ERROR_PRINTF("Invalid device type %d\n", dev_type);
+        return;
+    }
+
     ca3dmm_engine_p engine = (ca3dmm_engine_p) malloc(sizeof(ca3dmm_engine_s));
     memset(engine, 0, sizeof(ca3dmm_engine_s));
 
@@ -79,7 +85,61 @@ void ca3dmm_engine_init(
             gen_proc_grid = 0;
         }
     }
-    if (gen_proc_grid) calc_3d_decomposition(p, m, n, k, &mp, &np, &kp, &rp);
+    if (gen_proc_grid)
+    {
+        calc_3d_decomposition(p, m, n, k, &mp, &np, &kp, &rp);
+        int reduce_kp;
+        GET_ENV_INT_VAR(reduce_kp, "CA3DMM_REDUCE_KP", "reduce_kp", 1, 0, 1);
+        if (reduce_kp)
+        {
+            if ((kp >= 3) && (kp % 3 == 0))
+            {
+                if (mp <= np)
+                {
+                    int mp_new = mp * 3;
+                    int max_mn = (mp_new > np) ? mp_new : np;
+                    int min_mn = (mp_new < np) ? mp_new : np;
+                    if (max_mn % min_mn == 0)
+                    {
+                        kp /= 3;
+                        mp *= 3;
+                    }
+                } else {
+                    int np_new = np * 3;
+                    int max_mn = (np_new > mp) ? np_new : mp;
+                    int min_mn = (np_new < mp) ? np_new : mp;
+                    if (max_mn % min_mn == 0)
+                    {
+                        kp /= 3;
+                        np *= 3;
+                    }
+                }
+            }   // End of "if ((kp >= 3) && (kp % 3 == 0))"
+            else if ((kp >= 2) && (kp % 2 == 0))
+            {
+                if (mp <= np)
+                {
+                    int mp_new = mp * 2;
+                    int max_mn = (mp_new > np) ? mp_new : np;
+                    int min_mn = (mp_new < np) ? mp_new : np;
+                    if (max_mn % min_mn == 0)
+                    {
+                        kp /= 2;
+                        mp *= 2;
+                    }
+                } else {
+                    int np_new = np * 2;
+                    int max_mn = (np_new > mp) ? np_new : mp;
+                    int min_mn = (np_new < mp) ? np_new : mp;
+                    if (max_mn % min_mn == 0)
+                    {
+                        kp /= 2;
+                        np *= 2;
+                    }
+                }
+            }  // End of "if ((kp >= 2) && (kp % 2 == 0))"
+        }  // End of "if (reduce_kp)"
+    }
     if ((mp < 1) || (np < 1) || (kp < 1) || (mp * np * kp > p))
     {
         if (engine->my_rank == 0)
@@ -98,6 +158,7 @@ void ca3dmm_engine_init(
     engine->cannon_ms = 0.0;
     engine->reduce_ms = 0.0;
     engine->n_exec    = 0;
+    engine->dev_type  = dev_type;
 
     // 2. Handle the task groups, note that max(mp, np) is a multiplier of min(mp, np)
     int rank_k  = engine->my_rank / (mp * np);
@@ -176,7 +237,7 @@ void ca3dmm_engine_init(
         calc_block_spos_size(k, task_k_num, task_k_id, &task_k_spos, &task_k_size);
         cannon_engine_init(
             task_m_size, task_n_size, task_k_size, engine->comm_2dmm, 
-            &engine->cannon_engine, &engine->cannon_workbuf_bytes
+            dev_type, &engine->cannon_engine, &engine->cannon_workbuf_bytes
         );
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
@@ -315,16 +376,20 @@ void ca3dmm_engine_init(
     mat_redist_engine_init(
         src_A_scol, src_A_srow, src_A_ncol, src_A_nrow, 
         A_rd_scol,  A_rd_srow,  A_rd_ncol,  A_rd_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_A, &engine->rdA_workbuf_bytes
+        comm, MPI_DOUBLE, sizeof(double), dev_type, 
+        &engine->redist_A, &engine->rdA_workbuf_bytes
     );
     mat_redist_engine_init(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         B_rd_scol,  B_rd_srow,  B_rd_ncol,  B_rd_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, &engine->rdB_workbuf_bytes
+        comm, MPI_DOUBLE, sizeof(double), dev_type,
+        &engine->redist_B, &engine->rdB_workbuf_bytes
     );
     if ((engine->redist_A == NULL) || (engine->redist_B == NULL))
     {
         ERROR_PRINTF("Failed to initialize redist_A and redist_B\n");
+        mat_redist_engine_free(&engine->redist_A);
+        mat_redist_engine_free(&engine->redist_B);
         ca3dmm_engine_free(&engine);
         return;
     }
@@ -335,11 +400,13 @@ void ca3dmm_engine_init(
         mat_redist_engine_init(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
-            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, &engine->rdC_workbuf_bytes
+            comm, MPI_DOUBLE, sizeof(double), dev_type, 
+            &engine->redist_C, &engine->rdC_workbuf_bytes
         );
         if (engine->redist_C == NULL)
         {
             ERROR_PRINTF("Failed to initialize redist_C\n");
+            mat_redist_engine_free(&engine->redist_C);
             ca3dmm_engine_free(&engine);
             return;
         }
@@ -349,12 +416,14 @@ void ca3dmm_engine_init(
     size_t self_workbuf_bytes = 0;
     if (engine->is_active)
     {
-        self_workbuf_bytes += sizeof(double) * engine->A_rd_nrow * engine->A_rd_ncol;  // A_rd_recv
-        self_workbuf_bytes += sizeof(double) * engine->B_rd_nrow * engine->B_rd_ncol;  // B_rd_recv
-        if (trans_A == 1)   self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_trans
-        if (trans_B == 1)   self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_trans
-        if (task_n_num > 1) self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_2dmm
-        if (task_m_num > 1) self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_2dmm
+        size_t A_blk_bytes = sizeof(double) * engine->cannon_engine->max_A_blk_size;
+        size_t B_blk_bytes = sizeof(double) * engine->cannon_engine->max_B_blk_size;
+        self_workbuf_bytes += A_blk_bytes;  // A_rd_recv
+        self_workbuf_bytes += B_blk_bytes;  // B_rd_recv
+        if (trans_A == 1)   self_workbuf_bytes += A_blk_bytes;  // A_trans
+        if (trans_B == 1)   self_workbuf_bytes += B_blk_bytes;  // B_trans
+        if (task_n_num > 1) self_workbuf_bytes += A_blk_bytes;  // A_2dmm
+        if (task_m_num > 1) self_workbuf_bytes += B_blk_bytes;  // B_2dmm
         self_workbuf_bytes += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
         self_workbuf_bytes += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
     }
@@ -375,14 +444,11 @@ void ca3dmm_engine_init(
         *workbuf_bytes = total_workbuf_bytes;
     } else {
         engine->alloc_workbuf = 1;
-        void *work_buf = malloc(total_workbuf_bytes);
-        if (work_buf == NULL)
-        {
-            ERROR_PRINTF("Failed to allocate ca3dmm_engine work buffer of %zu bytes\n", total_workbuf_bytes);
-            ca3dmm_engine_free(&engine);
-            return;
-        }
-        ca3dmm_engine_attach_workbuf(engine, work_buf);
+        void *workbuf_h, *workbuf_d;
+        MALLOC_ATTACH_WORKBUF(
+            ca3dmm_engine_attach_workbuf, ca3dmm_engine_free, 
+            engine, dev_type, total_workbuf_bytes, workbuf_h, workbuf_d
+        );
     }
 
     GET_ENV_INT_VAR(engine->print_timing, "CA3DMM_PRINT_TIMING", "engine->print_timing", 0, 0, 1);
@@ -401,11 +467,17 @@ void ca3dmm_engine_init_BTB(
     const int src_B_scol, const int src_B_ncol,
     const int dst_C_srow, const int dst_C_nrow,
     const int dst_C_scol, const int dst_C_ncol,
-    const int *proc_grid, MPI_Comm comm, 
+    const int *proc_grid, MPI_Comm comm, dev_type_t dev_type, 
     ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 )
 {
     *engine_ = NULL;
+    if (is_dev_type_valid(dev_type) == 0)
+    {
+        ERROR_PRINTF("Invalid device type %d\n", dev_type);
+        return;
+    }
+
     ca3dmm_engine_p engine = (ca3dmm_engine_p) malloc(sizeof(ca3dmm_engine_s));
     memset(engine, 0, sizeof(ca3dmm_engine_s));
 
@@ -434,7 +506,17 @@ void ca3dmm_engine_init_BTB(
             gen_proc_grid = 0;
         }
     }
-    if (gen_proc_grid) calc_3d_decomposition_nk(p, n, k, &np, &kp, &rp);
+    if (gen_proc_grid)
+    {
+        calc_3d_decomposition_nk(p, n, k, &np, &kp, &rp);
+        int reduce_kp;
+        GET_ENV_INT_VAR(reduce_kp, "CA3DMM_REDUCE_KP", "reduce_kp", 1, 0, 1);
+        if ((reduce_kp) && (kp >= 4) && (kp % 4 == 0))
+        {
+            kp /= 4;
+            np *= 2;
+        }
+    }
     mp = np;
     if ((mp < 1) || (np < 1) || (kp < 1) || (mp * np * kp > p))
     {
@@ -454,6 +536,7 @@ void ca3dmm_engine_init_BTB(
     engine->cannon_ms = 0.0;
     engine->reduce_ms = 0.0;
     engine->n_exec    = 0;
+    engine->dev_type  = dev_type;
 
     // 2. Handle the task groups
     // Since np == mp, only task_k_num can > 1
@@ -508,8 +591,8 @@ void ca3dmm_engine_init_BTB(
         calc_block_spos_size(n, task_n_num, task_n_id, &task_n_spos, &task_n_size);
         calc_block_spos_size(k, task_k_num, task_k_id, &task_k_spos, &task_k_size);
         cannon_engine_init(
-            task_m_size, task_n_size, task_k_size, 
-            engine->comm_2dmm, &engine->cannon_engine, &engine->cannon_workbuf_bytes
+            task_m_size, task_n_size, task_k_size, engine->comm_2dmm, 
+            dev_type, &engine->cannon_engine, &engine->cannon_workbuf_bytes
         );
         cannon_engine_p ce = engine->cannon_engine;
         if (ce == NULL)
@@ -585,7 +668,8 @@ void ca3dmm_engine_init_BTB(
     mat_redist_engine_init(
         src_B_scol, src_B_srow, src_B_ncol, src_B_nrow, 
         engine->B_2dmm_scol, engine->B_2dmm_srow, engine->B_2dmm_ncol, engine->B_2dmm_nrow, 
-        comm, MPI_DOUBLE, sizeof(double), &engine->redist_B, &engine->rdB_workbuf_bytes
+        comm, MPI_DOUBLE, sizeof(double), dev_type, 
+        &engine->redist_B, &engine->rdB_workbuf_bytes
     );
     if (engine->redist_B == NULL)
     {
@@ -598,7 +682,8 @@ void ca3dmm_engine_init_BTB(
         mat_redist_engine_init(
             engine->C_out_scol, engine->C_out_srow, engine->C_out_ncol, engine->C_out_nrow, 
             dst_C_scol, dst_C_srow, dst_C_ncol, dst_C_nrow, 
-            comm, MPI_DOUBLE, sizeof(double), &engine->redist_C, &engine->rdC_workbuf_bytes
+            comm, MPI_DOUBLE, sizeof(double), dev_type, 
+            &engine->redist_C, &engine->rdC_workbuf_bytes
         );
         if (engine->redist_C == NULL)
         {
@@ -612,9 +697,11 @@ void ca3dmm_engine_init_BTB(
     size_t self_workbuf_bytes = 0;
     if (engine->is_active)
     {
-        self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_2dmm
-        self_workbuf_bytes += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;  // A_trans   
-        self_workbuf_bytes += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;  // B_2dmm
+        size_t A_blk_bytes = sizeof(double) * engine->cannon_engine->max_A_blk_size;
+        size_t B_blk_bytes = sizeof(double) * engine->cannon_engine->max_B_blk_size;
+        self_workbuf_bytes += A_blk_bytes;  // A_2dmm
+        self_workbuf_bytes += A_blk_bytes;  // A_trans
+        self_workbuf_bytes += B_blk_bytes;  // B_2dmm
         self_workbuf_bytes += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;  // C_2dmm
         self_workbuf_bytes += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;   // C_out
     }
@@ -635,14 +722,11 @@ void ca3dmm_engine_init_BTB(
         *workbuf_bytes = total_workbuf_bytes;
     } else {
         engine->alloc_workbuf = 1;
-        void *work_buf = malloc(total_workbuf_bytes);
-        if (work_buf == NULL)
-        {
-            ERROR_PRINTF("Failed to allocate ca3dmm_engine work buffer of %zu bytes\n", total_workbuf_bytes);
-            ca3dmm_engine_free(&engine);
-            return;
-        }
-        ca3dmm_engine_attach_workbuf(engine, work_buf);
+        void *workbuf_h, *workbuf_d;
+        MALLOC_ATTACH_WORKBUF(
+            ca3dmm_engine_attach_workbuf, ca3dmm_engine_free, 
+            engine, dev_type, total_workbuf_bytes, workbuf_h, workbuf_d
+        );
     }
 
     GET_ENV_INT_VAR(engine->print_timing, "CA3DMM_PRINT_TIMING", "engine->print_timing", 0, 0, 1);
@@ -655,7 +739,7 @@ void ca3dmm_engine_init_BTB(
 }
 
 // Attach an external work buffer for camm3d_engine
-void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *work_buf)
+void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *workbuf_h, void *workbuf_d)
 {
     size_t rdA_workbuf_bytes    = engine->rdA_workbuf_bytes;
     size_t rdB_workbuf_bytes    = engine->rdB_workbuf_bytes;
@@ -670,79 +754,160 @@ void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *work_buf)
     if (max_child_workbuf_bytes < cannon_workbuf_bytes) 
         max_child_workbuf_bytes = cannon_workbuf_bytes;
 
-    char *child_work_buf = (char *) work_buf;
-    char *self_work_buf  = child_work_buf + max_child_workbuf_bytes;
-    engine->work_buf = work_buf;
+    engine->workbuf_h = workbuf_h;
+    engine->workbuf_d = workbuf_d;
 
-    if (engine->redist_A != NULL) mat_redist_engine_attach_workbuf(engine->redist_A, child_work_buf);
-    if (engine->redist_B != NULL) mat_redist_engine_attach_workbuf(engine->redist_B, child_work_buf);
-    if (engine->redist_C != NULL) mat_redist_engine_attach_workbuf(engine->redist_C, child_work_buf);
-    if (engine->cannon_engine != NULL) cannon_engine_attach_workbuf(engine->cannon_engine, child_work_buf);
+    char *child_workbuf_h = (char *) workbuf_h;
+    char *child_workbuf_d = (char *) workbuf_d;
+    char *self_workbuf_h  = child_workbuf_h + max_child_workbuf_bytes;
+    char *self_workbuf_d  = child_workbuf_d + max_child_workbuf_bytes;
 
-    if ((engine->is_BTB == 0) && (engine->is_active))
+    if (engine->redist_A != NULL) mat_redist_engine_attach_workbuf(engine->redist_A, child_workbuf_h, child_workbuf_d);
+    if (engine->redist_B != NULL) mat_redist_engine_attach_workbuf(engine->redist_B, child_workbuf_h, child_workbuf_d);
+    if (engine->redist_C != NULL) mat_redist_engine_attach_workbuf(engine->redist_C, child_workbuf_h, child_workbuf_d);
+    if (engine->cannon_engine != NULL) cannon_engine_attach_workbuf(engine->cannon_engine, child_workbuf_h, child_workbuf_d);
+
+    dev_type_t dev_type = engine->dev_type;
+    size_t A_blk_bytes = 0, B_blk_bytes = 0;
+    if (engine->is_active)
     {
-        engine->A_rd_recv = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->A_rd_nrow * engine->A_rd_ncol;
-
-        engine->B_rd_recv = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->B_rd_nrow * engine->B_rd_ncol;
-
-        if (engine->trans_A)
-        {
-            engine->A_trans = (void *) self_work_buf;
-            self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
-        } else {
-            engine->A_trans = engine->A_rd_recv;
-        }
-
-        if (engine->trans_B)
-        {
-            engine->B_trans = (void *) self_work_buf;
-            self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
-        } else {
-            engine->B_trans = engine->B_rd_recv;
-        }
-
-        if (engine->task_n_num > 1)
-        {
-            engine->A_2dmm = (void *) self_work_buf;
-            self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
-        } else {
-            engine->A_2dmm = engine->A_trans;
-        }
-
-        if (engine->task_m_num > 1)
-        {
-            engine->B_2dmm = (void *) self_work_buf;
-            self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
-        } else {
-            engine->B_2dmm = engine->B_trans;
-        }
-
-        engine->C_2dmm = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
-
-        engine->C_out = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
-    } 
-
-    if ((engine->is_BTB == 1) && (engine->is_active)) 
-    {
-        engine->A_2dmm = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
-
-        engine->A_trans = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
-
-        engine->B_2dmm = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
-
-        engine->C_2dmm = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
-
-        engine->C_out = (void *) self_work_buf;
-        self_work_buf += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+        A_blk_bytes = sizeof(double) * engine->cannon_engine->max_A_blk_size;
+        B_blk_bytes = sizeof(double) * engine->cannon_engine->max_B_blk_size;
     }
+    if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA))
+    {
+        if ((engine->is_BTB == 0) && (engine->is_active))
+        {
+            engine->A_rd_recv_h = (void *) self_workbuf_h;
+            self_workbuf_h += A_blk_bytes;
+
+            engine->B_rd_recv_h = (void *) self_workbuf_h;
+            self_workbuf_h += B_blk_bytes;
+
+            if (engine->trans_A)
+            {
+                engine->A_trans_h = (void *) self_workbuf_h;
+                self_workbuf_h += A_blk_bytes;
+            } else {
+                engine->A_trans_h = engine->A_rd_recv_h;
+            }
+
+            if (engine->trans_B)
+            {
+                engine->B_trans_h = (void *) self_workbuf_h;
+                self_workbuf_h += B_blk_bytes;
+            } else {
+                engine->B_trans_h = engine->B_rd_recv_h;
+            }
+
+            if (engine->task_n_num > 1)
+            {
+                engine->A_2dmm_h = (void *) self_workbuf_h;
+                self_workbuf_h += A_blk_bytes;
+            } else {
+                engine->A_2dmm_h = engine->A_trans_h;
+            }
+
+            if (engine->task_m_num > 1)
+            {
+                engine->B_2dmm_h = (void *) self_workbuf_h;
+                self_workbuf_h += B_blk_bytes;
+            } else {
+                engine->B_2dmm_h = engine->B_trans_h;
+            }
+
+            engine->C_2dmm_h = (void *) self_workbuf_h;
+            self_workbuf_h += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+
+            engine->C_out_h = (void *) self_workbuf_h;
+            self_workbuf_h += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+        }
+        if ((engine->is_BTB == 1) && (engine->is_active)) 
+        {
+            engine->A_2dmm_h = (void *) self_workbuf_h;
+            self_workbuf_h += A_blk_bytes;
+
+            engine->A_trans_h = (void *) self_workbuf_h;
+            self_workbuf_h += A_blk_bytes;
+
+            engine->B_2dmm_h = (void *) self_workbuf_h;
+            self_workbuf_h += B_blk_bytes;
+
+            engine->C_2dmm_h = (void *) self_workbuf_h;
+            self_workbuf_h += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+
+            engine->C_out_h = (void *) self_workbuf_h;
+            self_workbuf_h += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+        }
+    }
+    #ifdef USE_CUDA
+    if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+    {
+        if ((engine->is_BTB == 0) && (engine->is_active))
+        {
+            engine->A_rd_recv_d = (void *) self_workbuf_d;
+            self_workbuf_d += A_blk_bytes;
+
+            engine->B_rd_recv_d = (void *) self_workbuf_d;
+            self_workbuf_d += B_blk_bytes;
+
+            if (engine->trans_A)
+            {
+                engine->A_trans_d = (void *) self_workbuf_d;
+                self_workbuf_d += A_blk_bytes;
+            } else {
+                engine->A_trans_d = engine->A_rd_recv_d;
+            }
+
+            if (engine->trans_B)
+            {
+                engine->B_trans_d = (void *) self_workbuf_d;
+                self_workbuf_d += B_blk_bytes;
+            } else {
+                engine->B_trans_d = engine->B_rd_recv_d;
+            }
+
+            if (engine->task_n_num > 1)
+            {
+                engine->A_2dmm_d = (void *) self_workbuf_d;
+                self_workbuf_d += A_blk_bytes;
+            } else {
+                engine->A_2dmm_d = engine->A_trans_d;
+            }
+
+            if (engine->task_m_num > 1)
+            {
+                engine->B_2dmm_d = (void *) self_workbuf_d;
+                self_workbuf_d += B_blk_bytes;
+            } else {
+                engine->B_2dmm_d = engine->B_trans_d;
+            }
+
+            engine->C_2dmm_d = (void *) self_workbuf_d;
+            self_workbuf_d += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+
+            engine->C_out_d = (void *) self_workbuf_d;
+            self_workbuf_d += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+        }
+        if ((engine->is_BTB == 1) && (engine->is_active)) 
+        {
+            engine->A_2dmm_d = (void *) self_workbuf_d;
+            self_workbuf_d += A_blk_bytes;
+
+            engine->A_trans_d = (void *) self_workbuf_d;
+            self_workbuf_d += A_blk_bytes;
+
+            engine->B_2dmm_d = (void *) self_workbuf_d;
+            self_workbuf_d += B_blk_bytes;
+
+            engine->C_2dmm_d = (void *) self_workbuf_d;
+            self_workbuf_d += sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+
+            engine->C_out_d = (void *) self_workbuf_d;
+            self_workbuf_d += sizeof(double) * engine->C_out_nrow  * engine->C_out_ncol;
+        }
+    }
+    #endif
 }
 
 // Free a camm3d_engine structure
@@ -753,7 +918,16 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
     free(engine->AB_agv_recvcnts);
     free(engine->AB_agv_displs);
     free(engine->C_rs_recvcnts);
-    if (engine->alloc_workbuf) free(engine->work_buf);
+    dev_type_t dev_type = engine->dev_type;
+    if (engine->alloc_workbuf)
+    {
+        if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA))
+            dev_type_free(engine->workbuf_h, DEV_TYPE_HOST);
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+            dev_type_free(engine->workbuf_d, dev_type);
+        #endif
+    }
     if (engine->is_BTB == 0) MPI_Comm_free(&engine->comm_AB_agv);
     MPI_Comm_free(&engine->comm_C_rs);
     MPI_Comm_free(&engine->comm_2dmm);
@@ -767,10 +941,8 @@ void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
 
 // Perform Communication-Avoiding 3D Matrix Multiplication (CA3DMM)
 void ca3dmm_engine_exec(
-    ca3dmm_engine_p engine,
-    const void *src_A, const int ldA,
-    const void *src_B, const int ldB,
-    void *dst_C, const int ldC
+    ca3dmm_engine_p engine, const void *src_A, const int ldA,
+    const void *src_B, const int ldB, void *dst_C, const int ldC
 )
 {
     if (engine == NULL)
@@ -791,17 +963,27 @@ void ca3dmm_engine_exec(
     int C_2dmm_ncol = engine->C_2dmm_ncol;
     int *AB_agv_recvcnts = engine->AB_agv_recvcnts;
     int *AB_agv_displs   = engine->AB_agv_displs;
-    double *A_rd_recv = (double *) engine->A_rd_recv;
-    double *A_2dmm    = (double *) engine->A_2dmm;
-    double *A_trans   = (double *) engine->A_trans;
-    double *B_rd_recv = (double *) engine->B_rd_recv;
-    double *B_2dmm    = (double *) engine->B_2dmm;
-    double *B_trans   = (double *) engine->B_trans;
-    double *C_2dmm    = (double *) engine->C_2dmm;
-    double *C_out     = (double *) engine->C_out;
+    double *A_rd_recv_h = (double *) engine->A_rd_recv_h;
+    double *A_2dmm_h    = (double *) engine->A_2dmm_h;
+    double *A_trans_h   = (double *) engine->A_trans_h;
+    double *B_rd_recv_h = (double *) engine->B_rd_recv_h;
+    double *B_2dmm_h    = (double *) engine->B_2dmm_h;
+    double *B_trans_h   = (double *) engine->B_trans_h;
+    double *C_2dmm_h    = (double *) engine->C_2dmm_h;
+    double *C_out_h     = (double *) engine->C_out_h;
+    double *A_rd_recv_d = (double *) engine->A_rd_recv_d;
+    double *A_2dmm_d    = (double *) engine->A_2dmm_d;
+    double *A_trans_d   = (double *) engine->A_trans_d;
+    double *B_rd_recv_d = (double *) engine->B_rd_recv_d;
+    double *B_2dmm_d    = (double *) engine->B_2dmm_d;
+    double *B_trans_d   = (double *) engine->B_trans_d;
+    double *C_2dmm_d    = (double *) engine->C_2dmm_d;
+    double *C_out_d     = (double *) engine->C_out_d;
+    dev_type_t dev_type = engine->dev_type;
 
-    double start_t, stop_t, exec_start_t, exec_stop_t;
-    double redist_ms, agvAB_ms, cannon_ms, reduce_ms, exec_ms;
+    double start_t, stop_t, exec_start_t, exec_stop_t, hd_start_t, hd_stop_t;
+    double redist_ms, agvAB_ms, cannon_ms, reduce_ms, exec_ms, hd_trans_ms;
+    hd_trans_ms = 0.0;
     
     exec_start_t = MPI_Wtime();
 
@@ -817,9 +999,21 @@ void ca3dmm_engine_exec(
         int trans_A  = engine->trans_A;
         int trans_B  = engine->trans_B;
         int recv_ldA = (trans_A) ? A_rd_ncol : A_rd_nrow;
-        int recv_ldB = (trans_B) ? B_rd_ncol : B_rd_nrow;   
-        mat_redist_engine_exec(engine->redist_A, src_A, ldA, A_rd_recv, recv_ldA);
-        mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_rd_recv, recv_ldB);
+        int recv_ldB = (trans_B) ? B_rd_ncol : B_rd_nrow;
+        if (dev_type == DEV_TYPE_HOST)
+        {
+            mat_redist_engine_exec(engine->redist_A, src_A, ldA, A_rd_recv_h, recv_ldA);
+            mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_rd_recv_h, recv_ldB);
+        }
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+        {
+            mat_redist_engine_exec(engine->redist_A, src_A, ldA, A_rd_recv_d, recv_ldA);
+            mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_rd_recv_d, recv_ldB);
+            hd_trans_ms += engine->redist_A->hd_trans_ms;
+            hd_trans_ms += engine->redist_B->hd_trans_ms;
+        }
+        #endif
         stop_t = MPI_Wtime();
         redist_ms = 1000.0 * (stop_t - start_t);
         engine->redist_ms += redist_ms;
@@ -846,46 +1040,147 @@ void ca3dmm_engine_exec(
             B_trans_nrow = B_2dmm_nrow;
             B_trans_ncol = B_2dmm_ncol;
         }
-        if (trans_A) transpose_cm_mat(A_trans_nrow, A_trans_ncol, A_rd_recv, A_trans_ncol, A_trans, A_2dmm_nrow);
-        else A_trans = A_rd_recv;
-        if (trans_B) transpose_cm_mat(B_trans_nrow, B_trans_ncol, B_rd_recv, B_trans_ncol, B_trans, B_2dmm_nrow);
-        else B_trans = B_rd_recv;
+        if (dev_type == DEV_TYPE_HOST)
+        {
+            if (trans_A) transpose_cm_mat(A_trans_nrow, A_trans_ncol, A_rd_recv_h, A_trans_ncol, A_trans_h, A_2dmm_nrow);
+            else A_trans_h = A_rd_recv_h;
+            if (trans_B) transpose_cm_mat(B_trans_nrow, B_trans_ncol, B_rd_recv_h, B_trans_ncol, B_trans_h, B_2dmm_nrow);
+            else B_trans_h = B_rd_recv_h;
+        }
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+        {
+            // Use cublasDgeam to transpose a matrix
+            if (trans_A)
+            {
+                cuda_cublas_dgeam(
+                    CublasTrans, CublasNoTrans, A_trans_nrow, A_trans_ncol, 
+                    1.0, A_rd_recv_d, A_trans_ncol,
+                    0.0, NULL, A_trans_nrow,
+                    A_trans_d, A_2dmm_nrow
+                );
+            } else {
+                A_trans_d = A_rd_recv_d;
+            }
+            if (trans_B)
+            {
+                cuda_cublas_dgeam(
+                    CublasTrans, CublasNoTrans, B_trans_nrow, B_trans_ncol, 
+                    1.0, B_rd_recv_d, B_trans_ncol,
+                    0.0, NULL, B_trans_nrow,
+                    B_trans_d, B_trans_nrow
+                );
+            } else {
+                B_trans_d = B_rd_recv_d;
+            }
+        }
+        #endif
 
         // Allgatherv A or B to make it complete
         if (engine->task_m_num > 1)
         {
+            void *B_trans_ptr, *B_2dmm_ptr;
+            if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA))
+            {
+                B_trans_ptr = B_trans_h;
+                B_2dmm_ptr  = B_2dmm_h;
+            }
+            #ifdef USE_CUDA
+            if (dev_type == DEV_TYPE_CUDA_MPI_DIRECT)
+            {
+                B_trans_ptr = B_trans_d;
+                B_2dmm_ptr  = B_2dmm_d;
+            }
+            if (dev_type == DEV_TYPE_CUDA)
+            {
+                hd_start_t = MPI_Wtime();
+                dev_type_memcpy(B_trans_h, B_trans_d, sizeof(double) * B_rd_nrow * B_rd_ncol, DEV_TYPE_HOST, dev_type);
+                hd_stop_t = MPI_Wtime();
+                hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+            }
+            #endif
             if (engine->use_ag)
             {
                 MPI_Allgather(
-                    B_trans, B_rd_nrow * B_rd_ncol, MPI_DOUBLE, B_2dmm, 
+                    B_trans_ptr, B_rd_nrow * B_rd_ncol, MPI_DOUBLE, B_2dmm_ptr,
                     AB_agv_recvcnts[0], MPI_DOUBLE, engine->comm_AB_agv
                 );
             } else {
                 MPI_Allgatherv(
-                    B_trans, B_rd_nrow * B_rd_ncol, MPI_DOUBLE, B_2dmm, 
+                    B_trans_ptr, B_rd_nrow * B_rd_ncol, MPI_DOUBLE, B_2dmm_ptr,
                     AB_agv_recvcnts, AB_agv_displs, MPI_DOUBLE, engine->comm_AB_agv
                 );
             }
+            #ifdef USE_CUDA
+            if (dev_type == DEV_TYPE_CUDA)
+            {
+                size_t B_2dmm_bytes = sizeof(double) * engine->B_2dmm_nrow * engine->B_2dmm_ncol;
+                hd_start_t = MPI_Wtime();
+                dev_type_memcpy(B_2dmm_d, B_2dmm_h, B_2dmm_bytes, dev_type, DEV_TYPE_HOST);
+                hd_stop_t = MPI_Wtime();
+                hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+            }
+            #endif
         } else {
-            B_2dmm = B_trans;
+            if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA)) 
+                B_2dmm_h = B_trans_h;
+            #ifdef USE_CUDA
+            if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+                B_2dmm_d = B_trans_d;
+            #endif
         }  // End of "if (engine->task_m_num > 1)"
 
         if (engine->task_n_num > 1)
         {
+            double *A_trans_ptr, *A_2dmm_ptr;
+            if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA))
+            {
+                A_trans_ptr = A_trans_h;
+                A_2dmm_ptr  = A_2dmm_h;
+            }
+            #ifdef USE_CUDA
+            if (dev_type == DEV_TYPE_CUDA_MPI_DIRECT)
+            {
+                A_trans_ptr = A_trans_d;
+                A_2dmm_ptr  = A_2dmm_d;
+            }
+            if (dev_type == DEV_TYPE_CUDA)
+            {
+                hd_start_t = MPI_Wtime();
+                dev_type_memcpy(A_trans_h, A_trans_d, sizeof(double) * A_rd_nrow * A_rd_ncol, DEV_TYPE_HOST, dev_type);
+                hd_stop_t = MPI_Wtime();
+                hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+            }
+            #endif
             if (engine->use_ag)
             {
                 MPI_Allgather(
-                    A_trans, A_rd_nrow * A_rd_ncol, MPI_DOUBLE, A_2dmm, 
+                    A_trans_ptr, A_rd_nrow * A_rd_ncol, MPI_DOUBLE, A_2dmm_ptr,
                     AB_agv_recvcnts[0], MPI_DOUBLE, engine->comm_AB_agv
                 );
             } else {
                 MPI_Allgatherv(
-                    A_trans, A_rd_nrow * A_rd_ncol, MPI_DOUBLE, A_2dmm, 
+                    A_trans_ptr, A_rd_nrow * A_rd_ncol, MPI_DOUBLE, A_2dmm_ptr,
                     AB_agv_recvcnts, AB_agv_displs, MPI_DOUBLE, engine->comm_AB_agv
                 );
             }
+            #ifdef USE_CUDA
+            if (dev_type == DEV_TYPE_CUDA)
+            {
+                size_t A_2dmm_bytes = sizeof(double) * engine->A_2dmm_nrow * engine->A_2dmm_ncol;
+                hd_start_t = MPI_Wtime();
+                dev_type_memcpy(A_2dmm_d, A_2dmm_h, A_2dmm_bytes, dev_type, DEV_TYPE_HOST);
+                hd_stop_t = MPI_Wtime();
+                hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+            }
+            #endif
         } else {
-            A_2dmm = A_trans;
+            if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA)) 
+                A_2dmm_h = A_trans_h;
+            #ifdef USE_CUDA
+            if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+                A_2dmm_d = A_trans_d;
+            #endif
         }  // End of "if (engine->task_n_num > 1)"
         stop_t = MPI_Wtime();
         agvAB_ms = 1000.0 * (stop_t - start_t);
@@ -893,7 +1188,15 @@ void ca3dmm_engine_exec(
         if (engine->print_timing) INFO_PRINTF("Allgather A or B time   = %.2f ms\n", agvAB_ms);
     } else {
         start_t = MPI_Wtime();
-        mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_2dmm, B_2dmm_nrow);
+        if (dev_type == DEV_TYPE_HOST)
+            mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_2dmm_h, B_2dmm_nrow);
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+        {
+            mat_redist_engine_exec(engine->redist_B, src_B, ldB, B_2dmm_d, B_2dmm_nrow);
+            hd_trans_ms += engine->redist_B->hd_trans_ms;
+        }
+        #endif
         stop_t = MPI_Wtime();
         redist_ms = 1000.0 * (stop_t - start_t);
         engine->redist_ms += redist_ms;
@@ -912,15 +1215,65 @@ void ca3dmm_engine_exec(
             if (ce_rank_row == ce_rank_col)
             {
                 assert(B_2dmm_nrow * B_2dmm_ncol == A_2dmm_nrow * A_2dmm_ncol);
-                memcpy(A_trans, B_2dmm, sizeof(double) * B_2dmm_nrow * B_2dmm_ncol);
+                if (dev_type == DEV_TYPE_HOST)
+                {
+                    #pragma omp parallel for 
+                    for (int i = 0; i < B_2dmm_nrow * B_2dmm_ncol; i++)
+                        A_trans_h[i] = B_2dmm_h[i];
+                }
+                #ifdef USE_CUDA
+                if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+                    cuda_cublas_dcopy(B_2dmm_nrow * B_2dmm_ncol, B_2dmm_d, 1, A_trans_d, 1);
+                #endif
             } else {
                 int ce_pair_rank = ce_rank_col * ce->np_dim + ce_rank_row;
+                double *B_2dmm_ptr, *A_trans_ptr;
+                if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA))
+                {
+                    B_2dmm_ptr  = B_2dmm_h;
+                    A_trans_ptr = A_trans_h;
+                }
+                #ifdef USE_CUDA
+                if (dev_type == DEV_TYPE_CUDA_MPI_DIRECT)
+                {
+                    B_2dmm_ptr  = B_2dmm_d;
+                    A_trans_ptr = A_trans_d;
+                }
+                if (dev_type == DEV_TYPE_CUDA)
+                {
+                    hd_start_t = MPI_Wtime();
+                    dev_type_memcpy(B_2dmm_h, B_2dmm_d, sizeof(double) * B_2dmm_nrow * B_2dmm_ncol, DEV_TYPE_HOST, dev_type);
+                    hd_stop_t = MPI_Wtime();
+                    hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+                }
+                #endif
                 MPI_Sendrecv(
-                    B_2dmm,  B_2dmm_nrow * B_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0,
-                    A_trans, A_2dmm_nrow * A_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0, ce->comm, MPI_STATUS_IGNORE
+                    B_2dmm_ptr,  B_2dmm_nrow * B_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0,
+                    A_trans_ptr, A_2dmm_nrow * A_2dmm_ncol, MPI_DOUBLE, ce_pair_rank, 0, ce->comm, MPI_STATUS_IGNORE
+                );
+                #ifdef USE_CUDA
+                if (dev_type == DEV_TYPE_CUDA)
+                {
+                    hd_start_t = MPI_Wtime();
+                    dev_type_memcpy(A_trans_d, A_trans_h, sizeof(double) * A_2dmm_nrow * A_2dmm_ncol, dev_type, DEV_TYPE_HOST);
+                    hd_stop_t = MPI_Wtime();
+                    hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+                }
+                #endif
+            }
+            if (dev_type == DEV_TYPE_HOST)
+                transpose_cm_mat(A_2dmm_nrow, A_2dmm_ncol, A_trans_h, A_2dmm_ncol, A_2dmm_h, A_2dmm_nrow);
+            #ifdef USE_CUDA
+            if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+            {
+                cuda_cublas_dgeam(
+                    CublasTrans, CublasNoTrans, A_2dmm_nrow, A_2dmm_ncol, 
+                    1.0, A_trans_d, A_2dmm_ncol,
+                    0.0, NULL, A_2dmm_nrow,
+                    A_2dmm_d, A_2dmm_nrow
                 );
             }
-            transpose_cm_mat(A_2dmm_nrow, A_2dmm_ncol, A_trans, A_2dmm_ncol, A_2dmm, A_2dmm_nrow);
+            #endif
         }  // End of "if (engine->is_active == 1)"
         stop_t = MPI_Wtime();
         agvAB_ms = 1000.0 * (stop_t - start_t);
@@ -931,8 +1284,18 @@ void ca3dmm_engine_exec(
     if (engine->is_active == 1)
     {
         start_t = MPI_Wtime();
-        if (engine->task_k_num == 1) C_2dmm = C_out;
-        cannon_engine_exec(1.0, A_2dmm, B_2dmm, 0.0, C_2dmm, engine->cannon_engine);
+        if (dev_type == DEV_TYPE_HOST)
+        {
+            if (engine->task_k_num == 1) C_2dmm_h = C_out_h;
+            cannon_engine_exec(engine->cannon_engine, 1.0, 0.0, A_2dmm_h, B_2dmm_h, C_2dmm_h);
+        }
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+        {
+            if (engine->task_k_num == 1) C_2dmm_d = C_out_d;
+            cannon_engine_exec(engine->cannon_engine, 1.0, 0.0, A_2dmm_d, B_2dmm_d, C_2dmm_d);
+        }
+        #endif
         stop_t = MPI_Wtime();
         cannon_ms = 1000.0 * (stop_t - start_t);
         engine->cannon_ms += cannon_ms;
@@ -941,18 +1304,49 @@ void ca3dmm_engine_exec(
         start_t = MPI_Wtime();
         if (engine->task_k_num > 1)
         {
+            double *C_2dmm_ptr, *C_out_ptr;
+            if ((dev_type == DEV_TYPE_HOST) || (dev_type == DEV_TYPE_CUDA))
+            {
+                C_2dmm_ptr = C_2dmm_h;
+                C_out_ptr  = C_out_h;
+            }
+            #ifdef USE_CUDA
+            if (dev_type == DEV_TYPE_CUDA_MPI_DIRECT)
+            {
+                C_2dmm_ptr = C_2dmm_d;
+                C_out_ptr  = C_out_d;
+            }
+            if (dev_type == DEV_TYPE_CUDA)
+            {
+                size_t C_2dmm_bytes = sizeof(double) * engine->C_2dmm_nrow * engine->C_2dmm_ncol;
+                hd_start_t = MPI_Wtime();
+                dev_type_memcpy(C_2dmm_h, C_2dmm_d, C_2dmm_bytes, DEV_TYPE_HOST, dev_type);
+                hd_stop_t = MPI_Wtime();
+                hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+            }
+            #endif
             if (engine->use_rsb)
             {
                 MPI_Reduce_scatter_block(
-                    C_2dmm, C_out, engine->C_rs_recvcnts[0], MPI_DOUBLE, 
+                    C_2dmm_ptr, C_out_ptr, engine->C_rs_recvcnts[0], MPI_DOUBLE, 
                     MPI_SUM, engine->comm_C_rs
                 );
             } else {
                 MPI_Reduce_scatter(
-                    C_2dmm, C_out, engine->C_rs_recvcnts, MPI_DOUBLE, 
+                    C_2dmm_ptr, C_out_ptr, engine->C_rs_recvcnts, MPI_DOUBLE, 
                     MPI_SUM, engine->comm_C_rs
                 );
             }
+            #ifdef USE_CUDA
+            if (dev_type == DEV_TYPE_CUDA)
+            {
+                size_t C_out_bytes = sizeof(double) * engine->C_out_nrow * engine->C_out_ncol;
+                hd_start_t = MPI_Wtime();
+                dev_type_memcpy(C_out_d, C_out_h, C_out_bytes, dev_type, DEV_TYPE_HOST);
+                hd_stop_t = MPI_Wtime();
+                hd_trans_ms += 1000.0 * (hd_stop_t - hd_start_t);
+            }
+            #endif
         }
         stop_t = MPI_Wtime();
         reduce_ms = 1000.0 * (stop_t - start_t);
@@ -964,9 +1358,21 @@ void ca3dmm_engine_exec(
         }
     }
 
+    engine->hd_trans_ms += hd_trans_ms;
+
     start_t = MPI_Wtime();
     if (engine->redist_C != NULL)
-        mat_redist_engine_exec(engine->redist_C, engine->C_out, engine->C_out_nrow, dst_C, ldC);
+    {
+        if (dev_type == DEV_TYPE_HOST)
+            mat_redist_engine_exec(engine->redist_C, engine->C_out_h, engine->C_out_nrow, dst_C, ldC);
+        #ifdef USE_CUDA
+        if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+        {
+            mat_redist_engine_exec(engine->redist_C, engine->C_out_d, engine->C_out_nrow, dst_C, ldC);
+            hd_trans_ms += engine->redist_C->hd_trans_ms;
+        }
+        #endif
+    }
     stop_t = MPI_Wtime();
     redist_ms = 1000.0 * (stop_t - start_t);
     engine->redist_ms += redist_ms;
@@ -986,12 +1392,13 @@ void ca3dmm_engine_reset_stat(ca3dmm_engine_p engine)
 {
     if (engine == NULL) return;
     cannon_engine_reset_stat(engine->cannon_engine);
-    engine->redist_ms = 0.0;
-    engine->agvAB_ms  = 0.0;
-    engine->cannon_ms = 0.0;
-    engine->reduce_ms = 0.0;
-    engine->exec_ms   = 0.0;
-    engine->n_exec    = 0;
+    engine->redist_ms   = 0.0;
+    engine->agvAB_ms    = 0.0;
+    engine->cannon_ms   = 0.0;
+    engine->reduce_ms   = 0.0;
+    engine->hd_trans_ms = 0.0;
+    engine->exec_ms     = 0.0;
+    engine->n_exec      = 0;
 }
 
 // Print the statistic data of a ca3dmm_engine (not a collective call)
@@ -1011,6 +1418,8 @@ void ca3dmm_engine_print_stat(ca3dmm_engine_p engine)
     printf("  * Allgather A or B     : %.2f ms\n", engine->agvAB_ms  / engine->n_exec);
     printf("  * 2D Cannon execution  : %.2f ms\n", engine->cannon_ms / engine->n_exec);
     printf("  * Reduce-scatter C     : %.2f ms\n", engine->reduce_ms / engine->n_exec);
+    if (engine->dev_type == DEV_TYPE_CUDA)
+        printf("  * CUDA H <-> D memcpy  : %.2f ms\n", engine->hd_trans_ms / engine->n_exec);
     cannon_engine_print_stat(engine->cannon_engine);
     printf("============================================================\n");
 }

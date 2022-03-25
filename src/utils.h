@@ -1,9 +1,11 @@
 // @brief    : Some helper functions I use here and there
 // @author   : Hua Huang <huangh223@gatech.edu>
-// @modified : 2021-10-08
+// @modified : 2021-10-09
 
 #ifndef __HUANGH223_UTILS_H__
 #define __HUANGH223_UTILS_H__
+
+#include <stdio.h>
 
 #ifdef __cplusplus
 #include <cassert>

@@ -8,21 +8,17 @@
 
 #include "ca3dmm.h"
 #include "example_utils.h"
-#include "utils.h"  // in CA3DMM's include/
+#include "utils.h"
+#include "cpu_linalg_lib_wrapper.h"
+#ifdef USE_CUDA
+#include "cuda_proxy.h"
+#endif
 
 int main(int argc, char **argv)
 {
-    MPI_Init(&argc, &argv);
-    srand48(time(NULL));
-
-    int my_rank, n_proc;
-    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &n_proc);
-
     if ((argc == 2) && ((strcmp(argv[1], "--help") == 0) || (strcmp(argv[1], "-h") == 0)))
     {
-        printf("Usage: %s m n k transA(0 or 1) transB(0 or 1) check_correct(0 or 1) n_test\n", argv[0]);
-        MPI_Finalize();
+        printf("Usage: %s m n k transA(0 or 1) transB(0 or 1) check_correct(0 or 1) n_test dev_type\n", argv[0]);
         return 0;
     }
 
@@ -33,6 +29,18 @@ int main(int argc, char **argv)
     int trans_B = get_int_param(argc, argv, 5, 0, 0, 1);
     int chk_res = get_int_param(argc, argv, 6, 1, 0, 1);
     int n_test  = get_int_param(argc, argv, 7, 10, 1, 100);
+    dev_type_t dev_type = get_int_param(argc, argv, 8, DEV_TYPE_HOST, DEV_TYPE_HOST, DEV_TYPE_CUDA_MPI_DIRECT);
+
+    #ifdef USE_CUDA
+    if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
+        select_cuda_device_by_mpi_local_rank();
+    #endif
+    
+    srand48(time(NULL));
+    int my_rank, n_proc;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &n_proc);
 
     if (my_rank == 0)
     {
@@ -40,6 +48,7 @@ int main(int argc, char **argv)
         printf("Transpose A / B             : %d / %d\n", trans_A, trans_B);
         printf("Number of tests             : %d\n", n_test);
         printf("Check result correctness    : %d\n", chk_res);
+        printf("Device type                 : %d\n", dev_type);
         printf("\n");
         fflush(stdout);
     }
@@ -81,14 +90,16 @@ int main(int argc, char **argv)
     size_t A_in_msize  = sizeof(double) * (size_t) A_in_nrow  * (size_t) A_in_ncol;
     size_t B_in_msize  = sizeof(double) * (size_t) B_in_nrow  * (size_t) B_in_ncol;
     size_t C_out_msize = sizeof(double) * (size_t) C_out_nrow * (size_t) C_out_ncol;
-    double *A_in  = (double *) malloc(A_in_msize);
-    double *B_in  = (double *) malloc(B_in_msize);
-    double *C_out = (double *) malloc(C_out_msize);
+    double *A_in_h  = (double *) dev_type_malloc(A_in_msize, DEV_TYPE_HOST);
+    double *B_in_h  = (double *) dev_type_malloc(B_in_msize, DEV_TYPE_HOST);
+    double *A_in_d  = (double *) dev_type_malloc(A_in_msize, dev_type);
+    double *B_in_d  = (double *) dev_type_malloc(B_in_msize, dev_type);
+    double *C_out_d = (double *) dev_type_malloc(C_out_msize, dev_type);
     for (int j = 0; j < A_in_ncol; j++)
     {
         int global_j = j + A_in_scol;
         size_t jcol_offset = (size_t) j * (size_t) A_in_nrow;
-        double *A_in_jcol = A_in + jcol_offset;
+        double *A_in_jcol = A_in_h + jcol_offset;
         for (int i = 0; i < A_in_nrow; i++)
         {
             int global_i = i + A_in_srow;
@@ -99,13 +110,15 @@ int main(int argc, char **argv)
     {
         int global_j = j + B_in_scol;
         size_t jcol_offset = (size_t) j * (size_t) B_in_nrow;
-        double *B_in_jcol = B_in + jcol_offset;
+        double *B_in_jcol = B_in_h + jcol_offset;
         for (int i = 0; i < B_in_nrow; i++)
         {
             int global_i = i + B_in_srow;
             B_in_jcol[i] = 0.11 * (double) global_i + 0.12 * (double) global_j;
         }
     }
+    dev_type_memcpy(A_in_d, A_in_h, A_in_msize, dev_type, DEV_TYPE_HOST);
+    dev_type_memcpy(B_in_d, B_in_h, B_in_msize, dev_type, DEV_TYPE_HOST);
 
     // Initialize ca3dmm_engine
     ca3dmm_engine_p ce;
@@ -115,10 +128,14 @@ int main(int argc, char **argv)
         A_in_srow,  A_in_nrow,  A_in_scol,  A_in_ncol,
         B_in_srow,  B_in_nrow,  B_in_scol,  B_in_ncol,
         C_out_srow, C_out_nrow, C_out_scol, C_out_ncol,
-        NULL, MPI_COMM_WORLD, &ce, &ce_workbuf_bytes
+        NULL, MPI_COMM_WORLD, dev_type, 
+        &ce, &ce_workbuf_bytes
     );
-    void *ce_work_buf = malloc(ce_workbuf_bytes);
-    ca3dmm_engine_attach_workbuf(ce, ce_work_buf);
+    void *workbuf_h, *workbuf_d;
+    MALLOC_ATTACH_WORKBUF(
+        ca3dmm_engine_attach_workbuf, ca3dmm_engine_free, 
+        ce, dev_type, ce_workbuf_bytes, workbuf_h, workbuf_d
+    );
     if (ce->my_rank == 0)
     {
         int mb = (m + ce->mp - 1) / ce->mp;
@@ -140,7 +157,7 @@ int main(int argc, char **argv)
     }
 
     // Warm up running
-    ca3dmm_engine_exec(ce, A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow);
+    ca3dmm_engine_exec(ce, A_in_d, A_in_nrow, B_in_d, B_in_nrow, C_out_d, C_out_nrow);
     ca3dmm_engine_reset_stat(ce);
 
     // Timing running
@@ -155,7 +172,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < n_test; i++)
     {
         MPI_Barrier(MPI_COMM_WORLD);
-        ca3dmm_engine_exec(ce, A_in, A_in_nrow, B_in, B_in_nrow, C_out, C_out_nrow);
+        ca3dmm_engine_exec(ce, A_in_d, A_in_nrow, B_in_d, B_in_nrow, C_out_d, C_out_nrow);
         redist_mss[i] = ce->redist_ms - redist_ms;
         agvAB_mss[i]  = ce->agvAB_ms  - agvAB_ms;
         cannon_mss[i] = ce->cannon_ms - cannon_ms;
@@ -229,14 +246,15 @@ int main(int argc, char **argv)
         size_t A_chk_msize = sizeof(double) * (size_t) A_chk_nrow * (size_t) A_chk_ncol;
         size_t B_chk_msize = sizeof(double) * (size_t) B_chk_nrow * (size_t) B_chk_ncol;
         size_t C_chk_msize = sizeof(double) * (size_t) C_chk_nrow * (size_t) C_chk_ncol;
-        double *A_chk = (double *) malloc(A_chk_msize);
-        double *B_chk = (double *) malloc(B_chk_msize);
-        double *C_chk = (double *) malloc(C_chk_msize);
+        double *A_chk_h = (double *) dev_type_malloc(A_chk_msize, DEV_TYPE_HOST);
+        double *B_chk_h = (double *) dev_type_malloc(B_chk_msize, DEV_TYPE_HOST);
+        double *C_chk_h = (double *) dev_type_malloc(C_chk_msize, DEV_TYPE_HOST);
+        double *C_out_h = (double *) dev_type_malloc(C_out_msize, DEV_TYPE_HOST);
         for (int j = 0; j < A_chk_ncol; j++)
         {
             int global_j = j + A_chk_scol;
             size_t jcol_offset = (size_t) j * (size_t) A_chk_nrow;
-            double *A_chk_jcol = A_chk + jcol_offset;
+            double *A_chk_jcol = A_chk_h + jcol_offset;
             for (int i = 0; i < A_chk_nrow; i++)
             {
                 int global_i = i + A_chk_srow;
@@ -247,7 +265,7 @@ int main(int argc, char **argv)
         {
             int global_j = j + B_chk_scol;
             size_t jcol_offset = (size_t) j * (size_t) B_chk_nrow;
-            double *B_chk_jcol = B_chk + jcol_offset;
+            double *B_chk_jcol = B_chk_h + jcol_offset;
             for (int i = 0; i < B_chk_nrow; i++)
             {
                 int global_i = i + B_chk_srow;
@@ -259,16 +277,17 @@ int main(int argc, char **argv)
         CBLAS_TRANSPOSE B_trans = (trans_B) ? CblasTrans : CblasNoTrans;
         cblas_dgemm(
             CblasColMajor, A_trans, B_trans, C_chk_nrow, C_chk_ncol, k,
-            1.0, A_chk, A_chk_nrow, B_chk, B_chk_nrow, 0.0, C_chk, C_chk_nrow
+            1.0, A_chk_h, A_chk_nrow, B_chk_h, B_chk_nrow, 0.0, C_chk_h, C_chk_nrow
         );
+        dev_type_memcpy(C_out_h, C_out_d, C_out_msize, DEV_TYPE_HOST, dev_type);
         
         int local_error = 0, total_error = 0;
         for (int j = 0; j < C_chk_ncol; j++)
         {
             size_t out_offset = (size_t) j * (size_t) C_out_nrow;
             size_t chk_offset = (size_t) j * (size_t) C_chk_nrow;
-            double *C_out_jcol = C_out + out_offset;
-            double *C_chk_jcol = C_chk + chk_offset;
+            double *C_out_jcol = C_out_h + out_offset;
+            double *C_chk_jcol = C_chk_h + chk_offset;
             for (int i = 0; i < C_chk_nrow; i++)
             {
                 double diff = C_out_jcol[i] - C_chk_jcol[i];
@@ -276,18 +295,22 @@ int main(int argc, char **argv)
                 if (relerr > 1e-12) local_error++;
             }
         }
-    MPI_Reduce(&local_error, &total_error, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_error, &total_error, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
         if (my_rank == 0) printf("CA3DMM output : %d error(s)\n", total_error);
-        free(A_chk);
-        free(B_chk);
-        free(C_chk);
+        dev_type_free(A_chk_h, DEV_TYPE_HOST);
+        dev_type_free(B_chk_h, DEV_TYPE_HOST);
+        dev_type_free(C_chk_h, DEV_TYPE_HOST);
+        dev_type_free(C_out_h, DEV_TYPE_HOST);
     }
 
-    free(A_in);
-    free(B_in);
-    free(C_out);
+    dev_type_free(A_in_h, DEV_TYPE_HOST);
+    dev_type_free(B_in_h, DEV_TYPE_HOST);
+    dev_type_free(A_in_d, dev_type);
+    dev_type_free(B_in_d, dev_type);
+    dev_type_free(C_out_d, dev_type);
+    dev_type_free(workbuf_h, DEV_TYPE_HOST);
+    dev_type_free(workbuf_d, dev_type);
     ca3dmm_engine_free(&ce);
-    free(ce_work_buf);
     MPI_Finalize();
     return 0;
 }
