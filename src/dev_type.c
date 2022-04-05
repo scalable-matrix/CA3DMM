@@ -40,7 +40,8 @@ void *dev_type_malloc(size_t bytes, dev_type_t dev_type)
     // When using CUDA, host memory is usually used as a mirror or 
     // a copy buffer of a device memory, so just use pinned memory
     if (dev_type == DEV_TYPE_HOST) 
-        cuda_malloc_host(&mem, bytes);
+        mem = malloc(bytes);
+        //cuda_malloc_host(&mem, bytes);
     if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
         cuda_malloc_dev(&mem, bytes);
     #endif
@@ -68,7 +69,7 @@ void dev_type_free(void *mem, dev_type_t dev_type)
 
     #ifdef USE_CUDA
     if (dev_type == DEV_TYPE_HOST) 
-        cuda_free_host(mem);
+        free(mem);
     if ((dev_type == DEV_TYPE_CUDA) || (dev_type == DEV_TYPE_CUDA_MPI_DIRECT))
         cuda_free_dev(mem);
     #endif
