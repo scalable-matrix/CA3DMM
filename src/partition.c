@@ -94,7 +94,8 @@ void fixed_pair_scale_grid(
 }
 
 // Calculate the near-optimal 3D decomposition of cuboid of size m * n * k for p processes
-void calc_3d_decomposition(
+// s.t. max(mp, np) is a multiple of min(mp, np)
+void calc_3d_decomposition_cannon(
     const int p, const int m, const int n, const int k,
     int *mp, int *np, int *kp, int *rp
 )
@@ -182,8 +183,7 @@ void calc_3d_decomposition(
     *np = proc_grid[idx_grid[1]];
     *kp = proc_grid[idx_grid[2]];
     *rp = p - (*mp) * (*np) * (*kp);
-
-    if (*rp * 5 > p)
+    if (*rp * 10 > p)
     {
         WARNING_PRINTF(
             "Failed to find a good solution, current: %d * %d * %d + %d\n", 
@@ -221,7 +221,7 @@ void calc_3d_decomposition_nk(
             *rp = tmp_rp;
         }
     }
-    if (*rp * 5 > p)
+    if (*rp * 10 > p)
     {
         WARNING_PRINTF(
             "Failed to find a good solution, current: %d * %d * %d + %d\n", 
@@ -229,3 +229,4 @@ void calc_3d_decomposition_nk(
         );
     }
 }
+
