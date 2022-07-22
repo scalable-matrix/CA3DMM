@@ -33,7 +33,7 @@ struct ca3dmm_engine
     int  B_2dmm_nrow, B_2dmm_ncol;  // Number of rows & cols of op(B) matrix block needed by this MPI process in 2D matmul
     int  C_2dmm_nrow, C_2dmm_ncol;  // Number of rows & cols of C matrix block calculated by this MPI process in 2D matmul
     int  C_out_nrow,  C_out_ncol;   // Number of rows & cols of output C matrix block owned by this MPI process
-    int  alloc_workbuf;             // If work_buf is allocated by cannon_engine
+    int  alloc_workbuf;             // If work_buf is allocated by ca3dmm_engine
     int  *AB_agv_recvcnts;          // Size unknown, recvcounts array used in MPI_Allgatherv after redistribution for A or B matrix
     int  *AB_agv_displs;            // Size unknown, displs array used in MPI_Allgatherv after redistribution for A or B matrix
     int  *C_rs_recvcnts;            // Size task_k_num, output C matrix block reduce-scatter receive count array
@@ -87,7 +87,7 @@ typedef struct ca3dmm_engine* ca3dmm_engine_p;
 extern "C" {
 #endif
 
-// Initialize a camm3d_engine structure for C := op(A) * op(B), op can be transpose or no-transpose
+// Initialize a ca3dmm_engine structure for C := op(A) * op(B), op can be transpose or no-transpose
 // Input parameters:
 //   m, n, k         : Size of matrix op(A) (m * k), op(B) (k * n), and C (m * n)
 //   trans_{A, B}    : If A / B matrix need to be transposed
@@ -104,7 +104,7 @@ extern "C" {
 //   comm            : MPI communicator of all MPI processes participating CA3DMM
 //   dev_type        : Data resident device type
 // Output parameter:
-//   *engine_       : Pointer to an initialized camm3d_engine structure
+//   *engine_       : Pointer to an initialized ca3dmm_engine structure
 //   *workbuf_bytes : Optional. If pointer is not NULL, the returning value is the size 
 //                    of work buffer, and ca3dmm_engine will not allocate work buffer.
 //                    If pointer is NULL, ca3dmm_engine will allocate and free work buffer.
@@ -123,7 +123,7 @@ void ca3dmm_engine_init(
     ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 );
 
-// Initialize a camm3d_engine structure for C := B^T * B
+// Initialize a ca3dmm_engine structure for C := B^T * B
 // Input parameters:
 //   n, k       : Size of matrix B (k * n) and C (n * n)
 //   src_B_srow : First row         of input  B matrix on this MPI process
@@ -139,7 +139,7 @@ void ca3dmm_engine_init(
 //   comm       : MPI communicator of all MPI processes participating CA3DMM
 //   dev_type   : Data resident device type
 // Output parameter:
-//   *engine_       : Pointer to an initialized camm3d_engine structure
+//   *engine_       : Pointer to an initialized ca3dmm_engine structure
 //   *workbuf_bytes : Optional. If pointer is not NULL, the returning value is the size 
 //                    of work buffer, and ca3dmm_engine will not allocate work buffer.
 //                    If pointer is NULL, ca3dmm_engine will allocate and free work buffer.
@@ -156,7 +156,7 @@ void ca3dmm_engine_init_BTB(
     ca3dmm_engine_p *engine_, size_t *workbuf_bytes
 );
 
-// Attach an external work buffer for camm3d_engine
+// Attach an external work buffer for ca3dmm_engine
 // Input parameters:
 //   engine   : Initialized cannon_engine_p
 //   workbuf_h : Work buffer on host, size >= *workbuf_bytes returned by ca3dmm_engine_init(_BTB)()
@@ -166,12 +166,12 @@ void ca3dmm_engine_init_BTB(
 //   2. workbuf_h can be NULL if dev_type == DEV_TYPE_CUDA_MPI_DIRECT
 void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *workbuf_h, void *workbuf_d);
 
-// Free a camm3d_engine structure
+// Free a ca3dmm_engine structure
 void ca3dmm_engine_free(ca3dmm_engine_p *engine_);
 
 // Perform Communication-Avoiding 3D Matrix Multiplication (CA3DMM)
 // Input parameters:
-//   engine      : An initialize camm3d_engine structure
+//   engine      : An initialize ca3dmm_engine structure
 //   src_{A, B}  : Size unknown, input A/B matrix block (col-major) on this MPI process
 //   ld{A, B, C} : Leading dimension of src_{A, B} and dst_C
 //                 If A/B is not transposed, ldA >= m and ldB >= k. 

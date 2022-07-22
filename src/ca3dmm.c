@@ -19,7 +19,7 @@ static inline void swap_int(int *a, int *b)
     *b = tmp;
 }
 
-// Initialize a camm3d_engine structure for C := op(A) * op(B)
+// Initialize a ca3dmm_engine structure for C := op(A) * op(B)
 void ca3dmm_engine_init(
     const int m, const int n, const int k, const int trans_A, const int trans_B, 
     const int src_A_srow, const int src_A_nrow,
@@ -70,7 +70,7 @@ void ca3dmm_engine_init(
     }
     if (gen_proc_grid)
     {
-        calc_3d_decomposition(p, m, n, k, &mp, &np, &kp, &rp);
+        calc_3d_decomposition_cannon(p, m, n, k, &mp, &np, &kp, &rp);
         int reduce_kp;
         GET_ENV_INT_VAR(reduce_kp, "CA3DMM_REDUCE_KP", "reduce_kp", 0, 0, 1);
         if (reduce_kp)
@@ -143,7 +143,7 @@ void ca3dmm_engine_init(
     engine->n_exec    = 0;
     engine->dev_type  = dev_type;
 
-    // 2. Handle the task groups, note that max(mp, np) is a multiplier of min(mp, np)
+    // 2. Handle the task groups, note that max(mp, np) is a multiple of min(mp, np)
     int rank_k  = engine->my_rank / (mp * np);
     int rank_mn = engine->my_rank % (mp * np);
     int rank_n  = rank_mn / mp;
@@ -443,7 +443,7 @@ void ca3dmm_engine_init(
     *engine_ = engine;
 }
 
-// Initialize a camm3d_engine structure for C := B^T * B
+// Initialize a ca3dmm_engine structure for C := B^T * B
 void ca3dmm_engine_init_BTB(
     const int n, const int k, 
     const int src_B_srow, const int src_B_nrow, 
@@ -721,7 +721,7 @@ void ca3dmm_engine_init_BTB(
     *engine_ = engine;
 }
 
-// Attach an external work buffer for camm3d_engine
+// Attach an external work buffer for ca3dmm_engine
 void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *workbuf_h, void *workbuf_d)
 {
     size_t rdA_workbuf_bytes    = engine->rdA_workbuf_bytes;
@@ -893,7 +893,7 @@ void ca3dmm_engine_attach_workbuf(ca3dmm_engine_p engine, void *workbuf_h, void 
     #endif
 }
 
-// Free a camm3d_engine structure
+// Free a ca3dmm_engine structure
 void ca3dmm_engine_free(ca3dmm_engine_p *engine_)
 {
     ca3dmm_engine_p engine = *engine_;

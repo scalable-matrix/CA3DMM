@@ -1,0 +1,45 @@
+#PBS -N CA3DMM-GPU              # job name
+#PBS -A GT-echow7-CODA20        # account to which job is charged
+#PBS -l nodes=8:ppn=24:gpus=2   # number of nodes and cores per node required
+#PBS -l pmem=7gb                # memory per core
+#PBS -l walltime=0:30:00        # duration of the job
+#PBS -j oe                      # combine output and error messages into 1 file
+#PBS -o ${PBS_JOBID%%.*}.out    # output file name
+#PBS -m abe                     # sends email on job abort, begin, and end
+
+cd $PBS_O_WORKDIR
+
+NP=$(wc -l $PBS_NODEFILE | awk '{print $1}')
+
+# Each node has 2 GPUs, uses 1 GPU + 12 cores (12 threads, no hyper-thread) per MPI rank
+cat $PBS_NODEFILE | sort | uniq > nodelist_$PBS_JOBID.txt
+cat nodelist_$PBS_JOBID.txt > tmp_$PBS_JOBID.txt
+cat nodelist_$PBS_JOBID.txt >> tmp_$PBS_JOBID.txt
+cat tmp_$PBS_JOBID.txt | sort > gpulist_$PBS_JOBID.txt
+rm tmp_$PBS_JOBID.txt
+
+NNODE=$(wc -l nodelist_$PBS_JOBID.txt | awk '{print $1}')
+NGPU=$(wc -l gpulist_$PBS_JOBID.txt | awk '{print $1}')
+
+export OMP_NUM_THREADS=12
+export OMP_PLACES=cores
+export MV2_CPU_BINDING_POLICY=hybrid
+export MV2_THREADS_PER_PROCESS=12
+
+module load cuda
+
+# Problem settings
+M=50000
+N=50000
+K=50000
+TRANS_A=0      # Do not transpose A
+TRANS_B=0      # Do not transpose B
+CHK_RES=0      # Skip result validation
+N_TEST=10      # Number of tests to run
+DEV_TYPE=1     # 0 == CPU, 1 == NV GPU
+
+echo "********** M = $M, N = $N, K = $K **********"
+mpirun -np $NGPU -f gpulist_$PBS_JOBID.txt ./example_AB.exe $M $N $K $TRANS_A $TRANS_B $CHK_RES $N_TEST $DEV_TYPE
+
+rm nodelist_$PBS_JOBID.txt
+rm gpulist_$PBS_JOBID.txt
