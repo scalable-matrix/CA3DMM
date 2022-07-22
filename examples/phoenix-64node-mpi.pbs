@@ -1,0 +1,26 @@
+#PBS -N CA3DMM-MPI              # job name
+#PBS -A GT-echow7-CODA20        # account to which job is charged
+#PBS -l nodes=64:ppn=24         # number of nodes and cores per node required
+#PBS -l pmem=7gb                # memory per core
+#PBS -l walltime=0:10:00        # duration of the job
+#PBS -j oe                      # combine output and error messages into 1 file
+#PBS -o ${PBS_JOBID%%.*}.out    # output file name
+#PBS -m abe                     # sends email on job abort, begin, and end
+
+cd $PBS_O_WORKDIR
+
+NP=$(wc -l $PBS_NODEFILE | awk '{print $1}')
+
+# Problem settings
+M=50000
+N=50000
+K=50000
+TRANS_A=0      # Do not transpose A
+TRANS_B=0      # Do not transpose B
+CHK_RES=0      # Skip result validation
+N_TEST=10      # Number of tests to run
+DEV_TYPE=0     # 0 == CPU, 1 == NV GPU
+
+echo "********** M = $M, N = $N, K = $K **********"
+mpirun -np $NP ./example_AB.exe $M $N $K $TRANS_A $TRANS_B $CHK_RES $N_TEST $DEV_TYPE
+
