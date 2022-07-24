@@ -5,7 +5,7 @@ Communication-Avoiding 3D Matrix Multiplication
 
 Clone the CA3DMM library from GitHub:
 ```shell
-git clone https://github.com/huanghua1994/CA3DMM.git
+git clone https://github.com/scalable-matrix/CA3DMM.git
 ```
 
 Enter directory `CA3DMM/src`. CA3DMM provides 4 example make files in `CA3DMM/src`:

@@ -1,0 +1,58 @@
+#PBS -N CA3DMM                  # job name
+#PBS -A GT-echow7-CODA20        # account to which job is charged
+#PBS -l nodes=86:ppn=24         # number of nodes and cores per node required
+#PBS -l pmem=7gb                # memory per core
+#PBS -l walltime=0:20:00        # duration of the job
+#PBS -j oe                      # combine output and error messages into 1 file
+#PBS -o ${PBS_JOBID%%.*}.out    # output file name
+
+cd $PBS_O_WORKDIR
+
+#NP=$(wc -l $PBS_NODEFILE | awk '{print $1}')
+NP=2048
+
+TRANSA=0
+TRANSB=0
+CHECK=0
+NTEST=10
+DEVTYPE=0
+
+export COSMA_OVERLAP_COMM_AND_COMP=ON
+
+M=50000
+N=50000
+K=50000
+printf "********** M = $M, N = $N, K = $K **********"
+printf "================ COSMA native layout ==================="
+mpirun -np $NP ./cosma_miniapp -m $M -n $N -k $K -r $NTEST
+printf "================ CA3DMM =================="
+mpirun -np $NP ./ca3dmm_example_AB $M $N $K $TRANSA $TRANSB $CHECK $NTEST $DEVTYPE 8 16 16
+
+M=6000
+N=6000
+K=1200000
+printf "********** M = $M, N = $N, K = $K **********"
+printf "================ COSMA native layout ==================="
+mpirun -np $NP ./cosma_miniapp -m $M -n $N -k $K -r $NTEST
+printf "================ CA3DMM =================="
+mpirun -np $NP ./ca3dmm_example_AB $M $N $K $TRANSA $TRANSB $CHECK $NTEST
+
+M=1200000
+N=6000
+K=6000
+printf "********** M = $M, N = $N, K = $K **********"
+printf "================ COSMA native layout ==================="
+mpirun -np $NP ./cosma_miniapp -m $M -n $N -k $K -r $NTEST
+printf "================ CA3DMM =================="
+mpirun -np $NP ./ca3dmm_example_AB $M $N $K $TRANSA $TRANSB $CHECK $NTEST
+
+M=100000
+N=100000
+K=5000
+printf "********** M = $M, N = $N, K = $K **********"
+printf "================ COSMA native layout ==================="
+mpirun -np $NP ./cosma_miniapp -m $M -n $N -k $K -r $NTEST
+printf "================ CA3DMM =================="
+mpirun -np $NP ./ca3dmm_example_AB $M $N $K $TRANSA $TRANSB $CHECK $NTEST
+
+rm nodelist_$PBS_JOBID.txt

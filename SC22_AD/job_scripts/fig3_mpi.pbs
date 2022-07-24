@@ -1,0 +1,51 @@
+#PBS -N CA3DMM                  # job name
+#PBS -A GT-echow7-CODA20        # account to which job is charged
+#PBS -l nodes=8:ppn=24          # number of nodes and cores per node required
+#PBS -l pmem=7gb                # memory per core
+#PBS -l walltime=0:20:00        # duration of the job
+#PBS -j oe                      # combine output and error messages into 1 file
+#PBS -o ${PBS_JOBID%%.*}.out    # output file name
+
+cd $PBS_O_WORKDIR
+
+NP=$(wc -l $PBS_NODEFILE | awk '{print $1}')
+
+cat $PBS_NODEFILE | sort | uniq > nodelist_$PBS_JOBID.txt
+NNODE=$(wc -l nodelist_$PBS_JOBID.txt | awk '{print $1}')
+
+M_list=(50000 6000    1200000 100000)
+N_list=(50000 6000    6000    100000)
+K_list=(50000 1200000 6000    5000)
+TRANSA=0
+TRANSB=0
+CHECK=0
+NTEST=10
+DEVTYPE=0
+
+#export OMP_NUM_THREADS=24
+#export OMP_PLACES=cores
+#export MV2_CPU_BINDING_POLICY=hybrid
+#export MV2_THREADS_PER_PROCESS=24
+
+export COSMA_OVERLAP_COMM_AND_COMP=ON
+
+for ((i = 0; i < 4; i++)); do
+    M=${M_list[$i]}
+    N=${N_list[$i]}
+    K=${K_list[$i]}
+    printf "********** M = $M, N = $N, K = $K **********"
+
+    printf "================ COSMA native layout ==================="
+    mpirun -np $NP ./cosma_miniapp -m $M -n $N -k $K -r $NTEST
+
+    printf "================ COSMA custom layout ==================="
+    mpirun -np $NP ./cosma_miniapp_cl $M $N $K $NTEST
+
+    printf "================ CA3DMM native and custom =================="
+    mpirun -np $NP ./ca3dmm_example_AB $M $N $K $TRANSA $TRANSB $CHECK $NTEST 0
+
+    printf "================ CTF native layout =================="
+    mpirun -np $NP ./ctf_matmul -m $M -n $N -k $K -sp_A 1.0 -sp_B 1.0 -sp_C 1.0 -bench 1 -niter $NTEST -test 0
+done
+
+rm nodelist_$PBS_JOBID.txt
