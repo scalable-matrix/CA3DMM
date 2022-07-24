@@ -16,7 +16,7 @@ export WORKDIR=$HOME/CA3DMM-tests
 
 ## Figures 3 and 4
 
-Clone and compile COSMA following [https://github.com/eth-cscs/COSMA/blob/master/INSTALL.md](https://github.com/eth-cscs/COSMA/blob/master/INSTALL.md). We only need to compile the CPU version in this section. Denote the directory you cloned COSMA as `COSMA_DIR`. Then, copy `$WORKDIR/cosma_miniapp_cl.cpp` to `$COSMA_DIR/miniapp`, modify `$COSMA_DIR/miniapp/CMakeLists.txt`, replace line 4 with 
+Clone and compile COSMA following [https://github.com/eth-cscs/COSMA/blob/master/INSTALL.md](https://github.com/eth-cscs/COSMA/blob/master/INSTALL.md). We only need to compile the CPU version in this section. Set the directory you cloned COSMA as `COSMA_DIR`. Then, copy `$WORKDIR/cosma_miniapp_cl.cpp` to `$COSMA_DIR/miniapp`, modify `$COSMA_DIR/miniapp/CMakeLists.txt`, replace line 4 with 
 
 ```cmake
 set(executables "layout_miniapp" "cosma_miniapp" "cosma_statistics" "cosma_miniapp_cl")
@@ -29,13 +29,13 @@ cp $COSMA_DIR/build/miniapp/cosma_miniapp    $WORKDIR/job_scripts/cosma_miniapp
 cp $COSMA_DIR/build/miniapp/cosma_miniapp_cl $WORKDIR/job_scripts/cosma_miniapp_cl
 ```
 
-Clone and compile CA3DMM following [https://github.com/scalable-matrix/CA3DMM/blob/main/README.md](https://github.com/scalable-matrix/CA3DMM/blob/main/README.md). We only need to compile the CPU version in this section. Denote the directory you cloned CA3DMM as `CA3DMM_DIR`. Then, copy the executable file:
+Clone and compile CA3DMM following [https://github.com/scalable-matrix/CA3DMM/blob/main/README.md](https://github.com/scalable-matrix/CA3DMM/blob/main/README.md). We only need to compile the CPU version in this section. Set the directory you cloned CA3DMM as `CA3DMM_DIR`. Then, copy the executable file:
 
 ```bash
-cp $CA3DMM_DIR/examples/ca3dmm_example_AB $WORKDIR/job_scripts/ca3dmm_example_AB
+cp $CA3DMM_DIR/examples/example_AB.exe $WORKDIR/job_scripts/ca3dmm_example_AB
 ```
 
-Clone and compile CTF following [https://github.com/cyclops-community/ctf/wiki/Building-and-testing](https://github.com/cyclops-community/ctf/wiki/Building-and-testing). We only need to compile the CPU version in this section. Denote the directory you cloned CTF as `CTF_DIR`. Then, copy the executable file:
+Clone and compile CTF following [https://github.com/cyclops-community/ctf/wiki/Building-and-testing](https://github.com/cyclops-community/ctf/wiki/Building-and-testing). We only need to compile the CPU version in this section. Set the directory you cloned CTF as `CTF_DIR`. Then, copy the executable file:
 
 ```bash
 cp $CTF_DIR/bin/matmul $WORKDIR/job_scripts/ctf_matmul
@@ -126,7 +126,13 @@ For CA3DMM:
 
 ## Reproducing Table 3
 
-Recompile COSMA, CA3DMM, and CTF with CUDA support.
+Recompile COSMA, CA3DMM, and CTF with CUDA support. Copy executable files:
+
+```bash
+cp $COSMA_DIR/build/miniapp/cosma_miniapp $WORKDIR/job_scripts/cosma_miniapp-cuda
+cp $CA3DMM_DIR/examples/example_AB.exe $WORKDIR/job_scripts/ca3dmm_example_AB-cuda
+cp $CTF_DIR/bin/matmul $WORKDIR/job_scripts/ctf_matmul-cuda
+```
 
 Modify `$WORKDIR/job_scripts/table3.pbs` based on the configuration of your cluster. This PBS file needs to be submitted twice for 16 and 32 GPUs' results.
 
