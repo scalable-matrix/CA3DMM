@@ -99,3 +99,24 @@ CA3DMM output : 0 error(s)
 ```
 
 The example program uses 1D column partition for the input A and B matrices and the output C matrix. The "Process grid" line shows the 3D process grid size. The "matmul only" line gives the runtime (in milliseconds) using library-native matrix partitioning.
+
+## 4. Cite this work
+
+If you use CA3DMM in your work, please cite our SC22 paper:
+
+```bibtex
+@inproceedings{huang2022ca3dmm,
+    title = { {CA3DMM}: A New Algorithm Based on a Unified View of Parallel Matrix Multiplication },
+    booktitle = {Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis},
+    publisher = {IEEE},
+    author = {Huang, Hua and Chow, Edmond},
+    doi = {10.5555/3571885.3571922},
+    isbn = {978-4-6654-5444-5},
+    address = {Dallas, TX, USA},
+    month = {Nov},
+    year = {2022},
+    pages = {381--395},
+}
+```
+
+Thank you very much for using our code!
